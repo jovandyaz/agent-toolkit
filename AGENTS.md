@@ -1,0 +1,36 @@
+# agent-toolkit: agent instructions
+
+Framework-agnostic Python building blocks for safe AI agents. Pieces plug into LangGraph, LangChain,
+CrewAI or provider SDKs; they never replace them. First consumer: a CoDi/pey collections agent for
+Hackatón México (separate private repo). Second planned consumer: CDMX permit pre-review (uses
+`budgets` and `audit-log`).
+
+## Read first
+- Design: `docs/superpowers/specs/2026-11-15-agent-toolkit-design.md` (approved 2026-11-16).
+- Plan: `docs/superpowers/plans/2026-11-16-agent-toolkit-packages-plan.md`. Tick steps as they land;
+  the plan is the progress record.
+
+## Rules
+- uv workspace, one package per `packages/<name>`, import path `agent_toolkit.<name>`
+  (namespace package: no `__init__.py` in `src/agent_toolkit/`).
+- Cores never import `langgraph`, `langchain*`, `psycopg` or any provider SDK. Adapters live in
+  `agent_toolkit.<name>.adapters.<x>` and ship as extras. Enforced by `lint-imports` and
+  `tests/test_core_isolation.py`. Each new package adds its portion to `[tool.importlinter] root_packages`.
+- Only `policy-gate` depends on other packages (`mandates`, `budgets`).
+- Money is an integer in minor units plus an ISO 4217 code. Never `float`.
+- Public types: Pydantic v2 frozen + strict; `mypy --strict`; no `Any` in public APIs.
+- `mandates`, `policy-gate` and `payments-core` are money paths: TDD, one fresh reviewer per task,
+  never weaken a test to make it pass.
+- `audit-log` stores hashes or references, never PII in clear.
+- This repo is public: no secrets, no real customer data, no pey operational details (those live in
+  the app repo).
+
+## Commands
+- `uv sync --all-packages`
+- `uv run pytest` (Postgres tests need `DATABASE_URL`; marker `postgres`)
+- `uv run ruff check . && uv run ruff format --check . && uv run mypy packages tests && uv run lint-imports`
+
+## Git
+Conventional Commits, single line, English, no trailers. Branch per package, PR per package; never
+push to `main`. Release tags for the app: `v0.1.0a1` (payments-core, webhooks, mandates),
+`v0.1.0a2` (+ budgets, policy-gate, audit-log), `v0.1.0a3` (+ evals), `v0.1.0`.

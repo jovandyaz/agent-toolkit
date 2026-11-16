@@ -1,0 +1,49 @@
+# Virtual workspace root: no package of its own. Each package lives in packages/<name>.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2,<10",
+    "ruff>=0.17,<0.18",
+    "mypy>=2.4,<3",
+    "import-linter>=2.16,<3",
+    "pydantic>=2.14,<3",  # needed by the pydantic.mypy plugin
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+explicit_package_bases = true
+namespace_packages = true
+
+[tool.pytest.ini_options]
+addopts = ["--strict-markers", "--import-mode=importlib"]
+markers = ["postgres: needs DATABASE_URL pointing to a disposable Postgres"]
+
+# Cores must stay framework-free. Adapters (agent_toolkit.<pkg>.adapters.*) are the only exception.
+# Each package adds its namespace portion to root_packages when it lands.
+[tool.importlinter]
+root_packages = []
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Package cores do not import frameworks, drivers or providers"
+type = "forbidden"
+source_modules = ["agent_toolkit.**"]
+forbidden_modules = ["langgraph", "langchain", "langchain_core", "psycopg"]
+ignore_imports = [
+    "agent_toolkit.*.adapters.** -> langgraph",
+    "agent_toolkit.*.adapters.** -> langchain_core",
+    "agent_toolkit.*.adapters.** -> psycopg",
+]
+unmatched_ignore_imports_alerting = "none"
