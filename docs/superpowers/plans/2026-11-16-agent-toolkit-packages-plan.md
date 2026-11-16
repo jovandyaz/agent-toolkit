@@ -126,7 +126,7 @@ def test_money_add_requires_same_currency():
   - `test_old_timestamp_raises` (fuera de la tolerancia de la librería).
   - `test_non_utf8_body_verifies_as_bytes`.
   - `test_process_once_skips_replay`: mismo `id` dos veces → handler llamado una vez, segunda llamada devuelve `None`. **(Review Focus 3)**
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa. **Step 4:** Run → PASS.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa. **Step 4:** Run → PASS.
 - [ ] **Step 5:** Checks limpios. Commit `feat(webhooks): add standard webhooks verification and idempotent inbox`.
 
 ### Task 3: `mandates`
