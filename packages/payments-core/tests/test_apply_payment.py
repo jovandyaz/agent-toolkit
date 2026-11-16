@@ -106,11 +106,25 @@ def test_late_payment_confirms_and_flags_late() -> None:
     assert intent.paid_total == mxn(35000)
 
 
-def test_payment_on_an_expired_attempt_confirms_while_another_attempt_is_open() -> None:
-    """Lateness is measured against the last attempt of the intent to expire."""
+def test_on_time_payment_on_an_attempt_marked_expired_confirms() -> None:
     # pialy: domain.test.ts > recordPayment > "still emits PaymentSucceeded when the attempt
     # expired but the intent is processing"
     push = an_attempt(status="expired")
+    qr = an_attempt(
+        id="att_2", rail="codi_qr", provider_ref="ref_2", expires_at=EXPIRES_AT + timedelta(hours=1)
+    )
+    intent = an_intent(attempts=(push, qr))
+
+    outcome = apply_provider_payment(intent, a_payment(received_at=WITHIN_VALIDITY))
+
+    assert outcome.kind == "confirmed"
+    assert applied_intent(outcome).late is False
+    assert applied_intent(outcome).attempts[0].status == "paid"
+
+
+def test_lateness_follows_the_attempt_that_was_paid() -> None:
+    """Ruling R6: late means after the paid attempt's own expiry, even if another is open."""
+    push = an_attempt()
     qr = an_attempt(
         id="att_2", rail="codi_qr", provider_ref="ref_2", expires_at=EXPIRES_AT + timedelta(hours=1)
     )
@@ -120,9 +134,8 @@ def test_payment_on_an_expired_attempt_confirms_while_another_attempt_is_open() 
         intent, a_payment(received_at=EXPIRES_AT + timedelta(minutes=1))
     )
 
-    assert outcome.kind == "confirmed"
-    assert applied_intent(outcome).late is False
-    assert applied_intent(outcome).attempts[0].status == "paid"
+    assert outcome.kind == "confirmed_late"
+    assert applied_intent(outcome).late is True
 
 
 def test_replayed_event_is_already_applied() -> None:
@@ -289,8 +302,11 @@ def test_payment_for_a_request_the_intent_never_made_raises() -> None:
 # source; cases already covered above carry the same kind of comment where they live.
 
 
-def test_payment_on_an_expired_intent_confirms_late() -> None:
-    """The intent had already expired, so the business may have released what it held."""
+def test_on_time_payment_on_an_expired_intent_confirms() -> None:
+    """Diverges from pialy, which marked it late: spec 7.6 confirms a payment made in validity.
+
+    Ruling R6: an expired intent does not make an on-time payment late.
+    """
     # pialy: domain.test.ts > recordPayment > "succeeds a expired intent with a
     # LatePaymentReceived event"
     # pialy: apply-provider-payment.test.ts > "marks a payment for an expired intent as late"
@@ -298,8 +314,8 @@ def test_payment_on_an_expired_intent_confirms_late() -> None:
 
     outcome = apply_provider_payment(intent, a_payment(received_at=WITHIN_VALIDITY))
 
-    assert outcome.kind == "confirmed_late"
-    assert applied_intent(outcome).late is True
+    assert outcome.kind == "confirmed"
+    assert applied_intent(outcome).late is False
     assert applied_intent(outcome).status == "paid"
     assert applied_intent(outcome).attempts[0].status == "paid"
 

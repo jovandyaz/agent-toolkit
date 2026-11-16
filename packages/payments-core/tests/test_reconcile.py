@@ -266,15 +266,45 @@ def test_new_payment_found_for_a_paid_intent_is_a_duplicate() -> None:
 
 
 def test_late_payment_found_for_an_expired_attempt_confirms_late() -> None:
+    """The payer paid after the attempt expired (ruling R6).
+
+    pialy's version paid within validity and expected late; that case is confirmed here (spec
+    7.6), see test_on_time_payment_for_a_stale_attempt_after_the_intent_expired_confirms.
+    """
     # pialy: reconcile-attempt.test.ts > "applies a late payment found for an expired attempt
     # (late-payment watch)"
     intent = an_intent(status="expired", attempts=(an_attempt(status="expired"),))
+    late = a_payment(received_at=EXPIRES_AT + timedelta(seconds=5))
 
-    outcome = reconcile_attempt(intent, "att_1", paid(a_payment()), AFTER_EXPIRY)
+    outcome = reconcile_attempt(intent, "att_1", paid(late), AFTER_EXPIRY)
 
     assert outcome.kind == "confirmed_late"
     assert reconciled_intent(outcome).late is True
     assert reconciled_intent(outcome).status == "paid"
+
+
+def test_on_time_payment_for_a_stale_attempt_after_the_intent_expired_confirms() -> None:
+    """Ruling R6: reconcile expired the intent, but the money was paid within validity."""
+    stale = an_attempt(
+        id="att_2",
+        rail="codi_qr",
+        provider_ref="ref_2",
+        expires_at=EXPIRES_AT + timedelta(seconds=5),
+    )
+    intent = an_intent(attempts=(an_attempt(), stale))
+    expired = reconciled_intent(reconcile_attempt(intent, "att_1", EXPIRED_UNPAID, AFTER_EXPIRY))
+    assert expired.status == "expired"
+    assert expired.attempts[1].status == "requested"
+    on_time = a_payment(
+        provider_ref="ref_2", rail="codi_qr", received_at=EXPIRES_AT + timedelta(seconds=2)
+    )
+
+    outcome = apply_provider_payment(expired, on_time)
+
+    assert outcome.kind == "confirmed"
+    assert reconciled_intent(outcome).late is False
+    assert reconciled_intent(outcome).status == "paid"
+    assert reconciled_intent(outcome).attempts[1].status == "paid"
 
 
 def test_attempt_the_provider_never_knew_expires_after_its_validity() -> None:

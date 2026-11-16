@@ -107,6 +107,8 @@ class ProviderPayment(BaseModel):
     """Money the provider reports as received for the request `provider_ref`.
 
     `provider_event_id` identifies this payment at the provider; it is the idempotency key.
+    The webhook and the provider query must report the same `provider_event_id` for the same
+    money, or reconciling a payment a webhook already applied flags a false `duplicate`.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")

@@ -32,7 +32,8 @@ def apply_provider_payment(
     - Another payment for an intent already paid: `duplicate`, the whole payment flagged for
       refund; the event is recorded so its own replay is `already_applied`.
     - Otherwise the payment counts up to the amount still owed (`partial`, `confirmed` or
-      `confirmed_late`) and anything beyond it is flagged as `excess`.
+      `confirmed_late`) and anything beyond it is flagged as `excess`. It is late only when
+      received after the `expires_at` of the attempt it paid, even if the intent had expired.
 
     The caller must read the intent and save the outcome in one unit of work that locks the
     intent (or rejects a concurrent change), or two payments applied at once can overwrite each
@@ -125,7 +126,7 @@ def _apply(intent: PaymentIntent, attempt: Attempt, payment: ProviderPayment) ->
     counted = min(payment.amount, owed, key=lambda money: money.amount_minor)
     excess = payment.amount - counted
     paid_total = intent.paid_total + counted
-    late = _is_late(intent, payment)
+    late = _is_late(attempt, payment)
     status: IntentStatus = "paid" if paid_total == intent.amount else "partially_paid"
     updated = _evolve(
         intent,
@@ -145,14 +146,12 @@ def _kind(status: IntentStatus, late: bool) -> OutcomeKind:
     return "confirmed_late" if late else "confirmed"
 
 
-def _is_late(intent: PaymentIntent, payment: ProviderPayment) -> bool:
-    """Late when received after the last attempt expired, or applied to an expired intent.
+def _is_late(attempt: Attempt, payment: ProviderPayment) -> bool:
+    """Late only when received after the paid attempt's own `expires_at` (spec 7.6, ruling R6).
 
-    An expired intent may already have released what it held, even if the payer paid in time
-    and the provider reported it late.
+    An expired intent does not make an on-time payment late: the payer paid within validity.
     """
-    window_end = max(a.expires_at for a in intent.attempts)
-    return intent.status == "expired" or payment.received_at > window_end
+    return payment.received_at > attempt.expires_at
 
 
 def _never_reached_provider(attempt: Attempt, status: ProviderStatus, now: datetime) -> bool:

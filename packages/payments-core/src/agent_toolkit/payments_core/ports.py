@@ -26,6 +26,11 @@ class RailConnector(Protocol):
         processed it without a conclusive answer: reconcile that attempt, never send it again.
         Raise when the request was not sent or was rejected; `may_retry_request` says whether
         sending it again is safe.
+
+        Assign the attempt's `provider_ref` before sending: a client-generated reference, or an
+        idempotency reference the provider echoes back. Otherwise an `ambiguous` attempt has no
+        reference to query or to match incoming webhooks, and real money paid for it becomes an
+        orphan refund.
         """
         ...
 
