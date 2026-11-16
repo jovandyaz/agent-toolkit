@@ -10,6 +10,7 @@ from agent_toolkit.payments_core import (
     PaymentOutcome,
     ProviderPayment,
     ProviderStatus,
+    RefundFlag,
     apply_provider_payment,
     reconcile_attempt,
 )
@@ -249,6 +250,19 @@ def test_payment_reported_by_webhook_and_reconcile_counts_once() -> None:
     assert outcome.kind == "already_applied"
     assert outcome.intent == after_webhook
     assert outcome.refund_flags == ()
+
+
+def test_new_payment_found_for_a_paid_intent_is_a_duplicate() -> None:
+    """Reconcile reports a second payment like a webhook would: money to refund, not a replay."""
+    second = a_payment(provider_event_id="evt_2")
+
+    outcome = reconcile_attempt(paid_intent(), "att_1", paid(second), AFTER_EXPIRY)
+
+    assert outcome.kind == "duplicate"
+    assert outcome.refund_flags == (
+        RefundFlag(reason="duplicate", amount=mxn(35000), provider_event_id="evt_2"),
+    )
+    assert reconciled_intent(outcome).paid_total == mxn(35000)
 
 
 def test_late_payment_found_for_an_expired_attempt_confirms_late() -> None:

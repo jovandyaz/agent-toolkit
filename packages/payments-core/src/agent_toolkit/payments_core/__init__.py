@@ -1,6 +1,9 @@
 """Request-to-pay payment domain without I/O: money, intents, attempts and payment policies.
 
-Test doubles for the ports live in `agent_toolkit.payments_core.testing`.
+The policies are pure functions, so sync and async code call them alike. The ports are
+synchronous Protocols; an async application can wrap them (for example with
+`asyncio.to_thread`) or write async adapters of its own. Test doubles for the ports live in
+`agent_toolkit.payments_core.testing`.
 """
 
 from agent_toolkit.payments_core.intent import (

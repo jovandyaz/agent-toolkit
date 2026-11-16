@@ -160,7 +160,7 @@ def test_second_distinct_payment_on_paid_intent_flags_duplicate() -> None:
     outcome = apply_provider_payment(paid, second)
 
     intent = applied_intent(outcome)
-    assert outcome.kind == "already_applied"
+    assert outcome.kind == "duplicate"
     assert outcome.refund_flags == (
         RefundFlag(reason="duplicate", amount=mxn(35000), provider_event_id="evt_2"),
     )
@@ -170,6 +170,7 @@ def test_second_distinct_payment_on_paid_intent_flags_duplicate() -> None:
 
 
 def test_replayed_duplicate_is_flagged_for_refund_only_once() -> None:
+    """Only the same `provider_event_id` is `already_applied`: a harmless replay, no refund."""
     paid = applied_intent(apply_provider_payment(an_intent(), a_payment()))
     second = a_payment(provider_event_id="evt_2")
     flagged = applied_intent(apply_provider_payment(paid, second))
@@ -335,6 +336,7 @@ def test_duplicate_on_another_attempt_marks_that_attempt_paid_without_counting_i
     )
 
     intent = applied_intent(outcome)
+    assert outcome.kind == "duplicate"
     assert intent.attempts[1].status == "paid"
     assert intent.paid_total == mxn(35000)
     assert outcome.refund_flags == (

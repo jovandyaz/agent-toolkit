@@ -10,9 +10,18 @@ IntentStatus = Literal["pending", "partially_paid", "paid", "expired"]
 AttemptStatus = Literal["requested", "ambiguous", "paid", "expired"]
 RefundReason = Literal["duplicate", "orphan", "excess"]
 ProviderStatusKind = Literal["paid", "pending", "expired_unpaid", "not_found"]
+# `already_applied`: the same provider event again, a harmless replay with nothing to refund.
+# `duplicate`: a different payment for an intent already paid, flagged for refund.
 # `pending` and `expired` are reconcile results: nothing changed yet, or the attempt expired.
 OutcomeKind = Literal[
-    "confirmed", "confirmed_late", "partial", "already_applied", "orphan", "pending", "expired"
+    "confirmed",
+    "confirmed_late",
+    "partial",
+    "already_applied",
+    "duplicate",
+    "orphan",
+    "pending",
+    "expired",
 ]
 
 Identifier = Annotated[str, Field(min_length=1)]

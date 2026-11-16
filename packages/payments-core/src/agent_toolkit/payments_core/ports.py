@@ -1,6 +1,12 @@
 """Ports the application implements around the pure policies (rail connector, storage).
 
 Policies never call these: the application reads with them, runs a policy, and writes back.
+The application must do that read and write in one `UnitOfWork` that locks the intent, and must
+deduplicate `orphan` refund flags by `provider_event_id`, since an orphan has no intent to
+remember its event.
+
+The ports are synchronous. An async application can wrap them (for example with
+`asyncio.to_thread`) or keep async adapters of its own around the pure policies.
 """
 
 from datetime import datetime
@@ -32,7 +38,8 @@ class IntentRepository(Protocol):
     """Storage for intents.
 
     Inside a unit of work, reads must lock the intent they return (or `save` must reject a
-    concurrent change), so two payments applied at once cannot overwrite each other.
+    concurrent change), so two payments applied at once cannot overwrite each other's
+    `paid_total` or `applied_event_ids`.
     """
 
     def get(self, intent_id: str) -> PaymentIntent | None: ...
@@ -45,7 +52,10 @@ class IntentRepository(Protocol):
 
 
 class UnitOfWork(Protocol):
-    """One transaction: leaving the block without `commit()` rolls it back."""
+    """One transaction: leaving the block without `commit()` rolls it back.
+
+    Read the intent, run the policy and save its outcome inside the same unit of work.
+    """
 
     def __enter__(self) -> Self: ...
 

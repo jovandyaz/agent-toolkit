@@ -27,10 +27,17 @@ def apply_provider_payment(
     """Account for a payment the provider reported, at most once per `provider_event_id`.
 
     - No intent: `orphan`, the whole payment flagged for refund.
-    - Event already applied: `already_applied`, nothing changes.
-    - Intent already paid: `already_applied`, the whole payment flagged as a `duplicate`.
+    - Same `provider_event_id` as an applied event: `already_applied`, a harmless replay;
+      nothing changes and nothing is flagged.
+    - Another payment for an intent already paid: `duplicate`, the whole payment flagged for
+      refund; the event is recorded so its own replay is `already_applied`.
     - Otherwise the payment counts up to the amount still owed (`partial`, `confirmed` or
       `confirmed_late`) and anything beyond it is flagged as `excess`.
+
+    The caller must read the intent and save the outcome in one unit of work that locks the
+    intent (or rejects a concurrent change), or two payments applied at once can overwrite each
+    other. An `orphan` has no intent to remember its event, so the caller must deduplicate
+    orphan refund flags by `provider_event_id`.
 
     Raises `CurrencyMismatchError` for a payment in another currency and `ValueError` when no
     attempt of the intent has the payment's `provider_ref`.
@@ -112,7 +119,7 @@ def _apply(intent: PaymentIntent, attempt: Attempt, payment: ProviderPayment) ->
     if intent.status == "paid":
         updated = _evolve(intent, attempts=attempts, applied_event_ids=applied_event_ids)
         duplicate = _refund("duplicate", payment.amount, payment)
-        return PaymentOutcome(kind="already_applied", intent=updated, refund_flags=(duplicate,))
+        return PaymentOutcome(kind="duplicate", intent=updated, refund_flags=(duplicate,))
 
     owed = intent.amount - intent.paid_total
     counted = min(payment.amount, owed, key=lambda money: money.amount_minor)
