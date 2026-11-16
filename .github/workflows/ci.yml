@@ -30,10 +30,7 @@ jobs:
       - run: uv sync --all-packages --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run mypy packages tests
-        if: hashFiles('packages/*/pyproject.toml') != ''
-      - run: uv run mypy tests
-        if: hashFiles('packages/*/pyproject.toml') == ''
+      - run: uv run scripts/typecheck.sh
       - run: uv run lint-imports
         if: hashFiles('packages/*/pyproject.toml') != ''
       - run: uv run pytest
