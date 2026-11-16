@@ -32,10 +32,13 @@ def verify(body: bytes, headers: Mapping[str, str], secret: str) -> VerifiedWebh
     Raises `InvalidSignatureError` for any verification failure, with the library error chained.
     """
     lowered = {name.lower(): value for name, value in headers.items()}
+    webhook = Webhook(secret)  # a malformed secret is a config error: let it propagate
     try:
-        Webhook(secret).verify(body, lowered, json_parse=False)
-        # verify() guarantees both headers are present and the timestamp is a valid number.
-        timestamp = datetime.fromtimestamp(float(lowered["webhook-timestamp"]), tz=UTC)
-        return VerifiedWebhook(id=lowered["webhook-id"], timestamp=timestamp, body=body)
-    except (WebhookVerificationError, UnicodeDecodeError) as error:
+        # The signature header is attacker-controlled: the library does not guard its split and
+        # base64 decode, so malformed values surface as ValueError (binascii.Error is one).
+        webhook.verify(body, lowered, json_parse=False)
+    except (WebhookVerificationError, ValueError) as error:
         raise InvalidSignatureError(str(error) or type(error).__name__) from error
+    # verify() guarantees both headers are present and the timestamp is a valid number.
+    timestamp = datetime.fromtimestamp(float(lowered["webhook-timestamp"]), tz=UTC)
+    return VerifiedWebhook(id=lowered["webhook-id"], timestamp=timestamp, body=body)
