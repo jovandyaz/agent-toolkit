@@ -1,0 +1,14 @@
+[project]
+name = "agent-toolkit-webhooks"
+version = "0.1.0a1"
+description = "Standard Webhooks signature verification and an idempotent inbox for exactly-once processing."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3", "standardwebhooks>=1.1,<2"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.webhooks"

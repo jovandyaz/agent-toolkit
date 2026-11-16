@@ -37,7 +37,7 @@ markers = ["postgres: needs DATABASE_URL pointing to a disposable Postgres"]
 # Cores must stay framework-free. Adapters (agent_toolkit.<pkg>.adapters.*) are the only exception.
 # Each package adds its namespace portion to root_packages when it lands.
 [tool.importlinter]
-root_packages = ["agent_toolkit.payments_core"]
+root_packages = ["agent_toolkit.payments_core", "agent_toolkit.webhooks"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
