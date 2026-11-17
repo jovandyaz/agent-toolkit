@@ -197,37 +197,37 @@ def test_money_add_requires_same_currency():
 
 **Files:**
 - Create: `packages/policy-gate/pyproject.toml` (deps workspace `agent-toolkit-mandates`, `agent-toolkit-budgets` vía `[tool.uv.sources] … = { workspace = true }`), `src/agent_toolkit/policy_gate/{__init__,models,decide}.py`
-- Test: `packages/policy-gate/tests/test_decide.py`
+- Test: `packages/policy-gate/tests/test_decide.py`, `test_models.py`
 
 **Interfaces:**
-- Consumes: `mandates.check`, `ClosedMandate`, `OpenMandate`, `Amount`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
+- Consumes: `mandates.check`, `consumed_in_period`, `ref_state`, `ClosedMandate`, `OpenMandate`, `ConsumptionEntry`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
 - Produces:
   - `Risk = Literal["low", "medium", "high"]`; `Effects(reads_sensitive: bool, changes_state: bool, external_comm: bool)`
-  - `ToolSpec(name, risk, effects, reversible: bool, financial: bool, args_model: type[BaseModel], to_closed_mandate: Callable[[BaseModel], ClosedMandate] | None)`; validación: `financial=True` exige `to_closed_mandate`.
+  - `ToolSpec(name, risk, effects, reversible: bool, financial: bool, args_model: type[BaseModel], to_closed_mandate: Callable[[BaseModel, str], ClosedMandate] | None)` (R29: recibe los args parseados y el `call_id`; debe ser determinista para un mismo (args, call_id), porque el adaptador LangGraph repite `decide` al reanudar y la aprobación liga el hash del cierre; la app acuña `charge_ref` en el servidor, p. ej. hash del thread id y el `call_id`, nunca desde los args); validación: `financial=True` exige `to_closed_mandate`, y solo una herramienta financiera lo acepta (en otra nunca correría). `decide` valida los args en modo estricto y rechaza claves desconocidas a toda profundidad aunque `args_model` no lo haga.
   - `SessionProfile(agent_id, principal_id, untrusted_input: bool, sensitive_access: bool, state_change: bool)`
   - `ToolCall(id: str, name: str, args: Mapping[str, object])`
   - `GateConfig(on_mandate_violation: Literal["deny", "require_approval"] = "require_approval")`
   - `Allow(kind="allow", args: BaseModel, closed: ClosedMandate | None)`, `RequireApproval(kind="require_approval", reasons: tuple[str, ...], args, closed)`, `Deny(kind="deny", reasons: tuple[str, ...])`; `Decision = Allow | RequireApproval | Deny` (unión discriminada por `kind`).
-  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, consumed: Amount | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime, config: GateConfig)`
+  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, ledger: tuple[ConsumptionEntry, ...] | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime (aware), config: GateConfig)` (R22: `ledger` es el ledger completo de este mandato y nada más; `decide` calcula `consumed_in_period(ledger, mandate, now)` y `ref_state(ledger, closed.charge_ref)` tras construir el cierre, así la ref siempre es la de la llamada. Herramienta financiera con mandato y `ledger is None` → `ValueError` antes de toda regla (R2). El llamador bloquea el mandato desde leer el ledger hasta registrar la reserva).
   - `decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision`
 - Reglas, en orden (la primera que aplica decide `Deny`; las de aprobación se acumulan):
   1. `call.name != tool.name` → `Deny("tool_mismatch")`.
-  2. Args inválidos según `args_model` → `Deny("invalid_args: …")`.
+  2. Args inválidos según `args_model` → `Deny("invalid_args:<loc>:<type>")`, una razón por error distinto (`loc` = `args.<ruta>`, o `closed.<ruta>` si falla el cierre del mandato; sin mensajes, que pueden traer PII). R25: cada segmento de `loc` se limita a `[A-Za-z0-9_]` (lo demás pasa a `_`) y 64 caracteres; `extra_forbidden` omite la clave desconocida (`invalid_args:args:extra_forbidden`).
   3. `budgets.check` no vacío → `Deny("budget_exceeded:<kind>")`.
-  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `account_not_allowed`, `mandate_mismatch`, `currency_mismatch`, `expired` o `revoked` → `Deny` siempre (no configurable). Otras violaciones → según `config`. `approval_reasons` → `RequireApproval`.
+  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `closed = tool.to_closed_mandate(args, call.id)`; un `ValueError`/`ValidationError` → `Deny("invalid_args:closed…")`; `closed.agent_id != session.agent_id` → `Deny("agent_mismatch")`; `mandate.principal_id != session.principal_id` → `Deny("principal_mismatch")` (R23); un `ValueError` del ledger → `Deny("ledger_inconsistent")` (R22); los tres antes de `check` y no configurables. Violaciones `account_not_allowed`, `mandate_mismatch`, `agent_mismatch`, `currency_mismatch`, `expired`, `revoked`, `previous_amount_mismatch` o `charge_ref_reused` (y cualquiera nueva) → `Deny("mandate:<v>")` siempre (no configurable). `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` y `outside_window` → según `config`. `approval_reasons` → `RequireApproval("mandate:<r>")`.
   5. No financiero con `risk="high"` → `RequireApproval("high_risk")`.
-  6. Sesión con las tres banderas Rule of Two y `effects.changes_state`, salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
+  6. Sesión con las tres banderas Rule of Two y `effects.changes_state` o `effects.external_comm` (R24: la [C] de Meta es "cambiar estado o comunicarse hacia afuera"), salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
   7. Si no → `Allow`.
 
-- [ ] **Step 1: Tests** (una por regla, más):
+- [x] **Step 1: Tests** (una por regla, más):
   - `test_foreign_account_is_denied_even_if_config_says_approval` (7.3(c)).
   - `test_open_amount_qr_requires_approval`.
   - `test_violation_follows_config` (`amount_out_of_range` con ambas configuraciones).
   - `test_rule_of_two_allows_verified_mandate_but_not_unmandated_state_change`.
   - `test_allow_returns_parsed_args_and_closed_mandate`.
   - `test_low_risk_read_is_allowed_without_mandate`.
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa `decide` como función pura. **Step 4:** Run → PASS.
-- [ ] **Step 5:** Checks limpios; `lint-imports` confirma que el núcleo no importa `langgraph`. Commit `feat(policy-gate): add deterministic tool-call decisions`.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa `decide` como función pura. **Step 4:** Run → PASS.
+- [x] **Step 5:** Checks limpios; `lint-imports` confirma que el núcleo no importa `langgraph`. Commit `feat(policy-gate): add deterministic tool-call decisions`.
 
 ### Task 6: `policy-gate` (adaptador LangGraph)
 
@@ -238,25 +238,27 @@ def test_money_add_requires_same_currency():
 **Interfaces:**
 - Consumes: `decide`, `Decision`, `ToolSpec`, `ToolCall`, `GateContext` (Tarea 5).
 - Produces:
-  - `ApprovalRequest(call_id: str, tool: str, args: dict[str, object], reasons: tuple[str, ...], closed_mandate_hash: str | None, request_hash: str)` (`request_hash` = sha256 de `call_id`, `tool`, args canónicos y `closed_mandate_hash`).
-  - `ApprovalDecision(request_hash: str, approved: bool, approver_id: str, approval_id: str, at: datetime)`
-  - `GatedToolNode(tools: Sequence[BaseTool], specs: Mapping[str, ToolSpec], context: Callable[[StateT], GateContext], on_decision: Callable[[ToolCall, Decision, ApprovalDecision | None], None] | None = None)`, invocable como nodo; lee los `tool_calls` del último `AIMessage` y devuelve `ToolMessage`s.
+  - `ApprovalRequest(call_id: str, tool: str, args: dict[str, object], reasons: tuple[str, ...], closed_mandate_hash: str | None, request_hash: str)` (`request_hash` = sha256 del JSON canónico de `thread_id` del config (R32: no pasa a otro hilo que reuse el `call_id`; sin `thread_id` → `ValueError`), `call_id`, `tool`, args validados (`model_dump(mode="json")`), `reasons` (R28: una aprobación no cubre una razón nueva) y `closed_mandate_hash`). Es un vínculo de integridad, no autenticación: el canal de reanudación debe estar autenticado.
+  - `ApprovalDecision(request_hash: str, approved: bool, approver_id: str, approval_id: str, at: datetime)` (estricto; `at` acepta además ISO 8601 para reanudaciones JSON).
+  - `CLOSED_MANDATE_KEY = "agent_toolkit_closed_mandate"` y `closed_mandate_from_config(config: RunnableConfig) -> ClosedMandate | None` (R29): al ejecutar, el nodo pone `decision.closed` (None si no hay) en `configurable[CLOSED_MANDATE_KEY]` del config de la herramienta; la herramienta financiera emite exactamente ese cargo (ref y monto revisados y aprobados).
+  - `GatedToolNode(tools: Sequence[BaseTool], specs: Mapping[str, ToolSpec], context: Callable[[StateT], GateContext], on_decision: Callable[[ToolCall, Decision, ApprovalDecision | None], None] | None = None)`, invocable como nodo; lee los `tool_calls` del último `AIMessage` y devuelve `ToolMessage`s. `ValueError` al construir si los argumentos de una herramienta (`tool_call_schema`) no son exactamente los campos del `args_model` de su spec (R32).
 - Algoritmo (fija el comportamiento de Review Focus 1 y 2):
-  1. Decide **todas** las llamadas antes de ejecutar cualquiera.
+  1. Decide **todas** las llamadas antes de ejecutar cualquiera, en orden, sobre una copia de trabajo del ledger (R31): tras cada `Allow` o `RequireApproval` financiera con `mandates.reserve_amount(closed)` no nulo, añade `ConsumptionEntry(charge_ref=closed.charge_ref, kind="reserve", amount=…, at=ctx.now)` antes de decidir la siguiente. Una llamada sobre el `charge_ref` de una llamada anterior del turno no denegada → `Deny("charge_ref_in_turn")`, no configurable (R33: su revisión dependería de una reserva que el rechazo de la anterior deshace; los cambios de varios pasos a un mismo cargo van en turnos distintos). Puro y determinista: los `request_hash` no cambian en la re-ejecución.
   2. Si hay `RequireApproval`, un solo `interrupt([ApprovalRequest, …])` antes de ejecutar nada. El valor de reanudación es `dict[call_id, ApprovalDecision]`.
   3. Al reanudar, el nodo se re-ejecuta desde el inicio y `decide` se repite (es puro): una decisión se acepta solo si su `request_hash` coincide con el recalculado. Si falta o no coincide, esa llamada se rechaza.
-  4. Ejecuta las `Allow` y las aprobadas; `Deny` y las rechazadas producen `ToolMessage(status="error", content=<razón accionable>)`.
-  5. `on_decision` se llama una vez por llamada con su resultado final (la app lo conecta a `audit-log`).
+  4. Ejecuta las `Allow` y las aprobadas, con los args validados y el `ClosedMandate` revisado en el config; `Deny` y las rechazadas producen `ToolMessage(status="error", content=<razón accionable>)` (`approval_invalid`, `approval_missing`, `approval_mismatch`, `approval_rejected`, `unknown_tool`, o las razones de `decide`).
+  5. `on_decision` se llama una vez por llamada con su resultado final (la app lo conecta a `audit-log`): `Allow`/`RequireApproval` tras ejecutar, también si la herramienta lanzó (R32: se reporta en un `finally` y la excepción se propaga; las llamadas posteriores se deciden y reportan al re-ejecutar el hilo); `Deny` (con `approval_*` primero si fue rechazada) antes de ejecutar nada.
+  6. Las herramientas no llaman `interrupt()`: reanudarlo re-ejecutaría el nodo y las llamadas ya ejecutadas.
 
-- [ ] **Step 1: Tests** (grafo mínimo `StateGraph` + `InMemorySaver`, herramientas fake que cuentan invocaciones):
+- [x] **Step 1: Tests** (grafo mínimo `StateGraph` + `InMemorySaver`, herramientas fake que cuentan invocaciones):
   - `test_allowed_call_executes`.
   - `test_denied_call_returns_error_message_and_does_not_execute`.
   - `test_approval_interrupts_then_executes_on_approved_resume` (`Command(resume={call_id: decision})`).
   - `test_resume_executes_each_tool_once`: una llamada `Allow` + una `RequireApproval` en el mismo turno; tras reanudar aprobada, cada contador == 1. **(Review Focus 1)**
   - `test_resume_with_mismatched_hash_rejects`. **(Review Focus 2)**
   - `test_on_decision_called_once_per_call`.
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa siguiendo la doc vigente de `interrupt`/`Command` (en langgraph 1.2, `interrupt(value, *, response_schema=…)` puede validar la reanudación). **Step 4:** Run → PASS.
-- [ ] **Step 5:** Checks limpios. Commit `feat(policy-gate): add langgraph gated tool node with interrupt approvals`.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa siguiendo la doc vigente de `interrupt`/`Command` (en langgraph 1.2, `interrupt(value, *, response_schema=…)` puede validar la reanudación). **Step 4:** Run → PASS.
+- [x] **Step 5:** Checks limpios. Commit `feat(policy-gate): add langgraph gated tool node with interrupt approvals`.
 
 ### Task 7: `audit-log`
 
