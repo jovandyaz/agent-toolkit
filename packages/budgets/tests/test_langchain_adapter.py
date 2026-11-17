@@ -40,6 +40,21 @@ class CountingModel(GenericFakeChatModel):
         return super()._generate(*args, **kwargs)
 
 
+class FailingModel(GenericFakeChatModel):
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        raise RuntimeError("model unavailable")
+
+
+def test_failed_model_call_keeps_its_iteration() -> None:
+    # Charged at the call's start, before the model fails: nothing reports tokens afterwards.
+    handler = BudgetCallbackHandler(BudgetLimits(), None)
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        FailingModel(messages=iter([])).invoke("a", config=_config(handler))
+    assert handler.state.iterations == 1
+    assert handler.state.input_tokens == handler.state.output_tokens == 0
+    assert handler.state.consecutive_failures == 0
+
+
 def test_tokens_and_iterations_accumulate_across_calls() -> None:
     pricing = Pricing(input_per_mtok_usd=Decimal(3), output_per_mtok_usd=Decimal(15))
     handler = BudgetCallbackHandler(BudgetLimits(), pricing)

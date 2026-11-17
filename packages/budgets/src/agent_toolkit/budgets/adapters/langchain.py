@@ -18,8 +18,9 @@ Accounting:
 After each update, exceeded limits raise `BudgetExceededError`; `raise_error = True` makes
 LangChain propagate it instead of logging it. The handler is sticky: once a limit is exceeded
 it raises again on every later callback (LLM, chain and tool starts and ends), so a caller that
-swallows the first error cannot keep running the agent. Failed LLM calls (`on_llm_error`) are
-not charged. With a `max_cost_usd` limit, `pricing` is required (ValueError otherwise).
+swallows the first error cannot keep running the agent. An LLM call that fails
+(`on_llm_error`) keeps the iteration charged at its start; it adds no tokens, cost or failure.
+With a `max_cost_usd` limit, `pricing` is required (ValueError otherwise).
 """
 
 from threading import Lock
