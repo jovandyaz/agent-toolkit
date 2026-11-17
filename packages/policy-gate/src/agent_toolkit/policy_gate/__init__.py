@@ -9,6 +9,7 @@ machine-readable strings, listed in the docstring of `decide`.
 from agent_toolkit.policy_gate.decide import decide
 from agent_toolkit.policy_gate.models import (
     Allow,
+    BuildContext,
     Decision,
     Deny,
     Effects,
@@ -24,6 +25,7 @@ from agent_toolkit.policy_gate.models import (
 
 __all__ = [
     "Allow",
+    "BuildContext",
     "Decision",
     "Deny",
     "Effects",

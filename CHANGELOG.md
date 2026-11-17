@@ -29,4 +29,36 @@ First release, `0.1.0`, of seven packages.
 - A README per package, executed as tests; `scripts/check_versions.py` and a CI job tying release
   tags to package versions.
 
+### Changed
+
+Since `v0.1.0a1`. That tag held mandates, payments-core and webhooks only; these changes break
+code written against earlier commits of `agent-toolkit-policy-gate`.
+
+- **Breaking:** a financial tool's builder is `to_closed_mandate(args, ctx)` with `ctx` a
+  `BuildContext(thread_id, message_id, call_id)`, not `(args, call_id)`. Mint a new charge's
+  `charge_ref` from all three ids: some providers repeat call ids such as `call_0` in every
+  message. `decide` takes `thread_id=` and `message_id=`, both required for a financial call under
+  a mandate.
+- **Breaking:** `GatedToolNode` needs `configurable["thread_id"]` on every turn with tool calls,
+  not only when a call needs approval, and an id on the `AIMessage` that proposes them
+  (`add_messages`, as in `MessagesState`, gives one); either missing raises ValueError before
+  anything is decided.
+- **Breaking:** the interrupt value is plain JSON, a list of `ApprovalRequest.model_dump(mode=
+  "json")`, so it survives LangGraph's strict msgpack checkpoints; read it back with
+  `model_validate_json`. Resume with `{call_id: ApprovalDecision.model_dump(mode="json")}` (an
+  `ApprovalDecision` object is still accepted). `ApprovalRequest` gains `closed`, the charge as
+  it will run, bound by `closed_mandate_hash`; the `request_hash` also binds the message id.
+- **Breaking:** `on_decision` reports an `Allow` or approved `RequireApproval` right before its
+  tool runs, not once the tool ran or raised, so an audit log that fails blocks the call.
+- Each call the node runs gets, in its config, an idempotency key and a fingerprint under
+  `IDEMPOTENCY_KEY` and `FINGERPRINT_KEY`, read with `idempotency_key_from_config` (send it to the
+  payment provider) and `call_fingerprint_from_config`.
+- `GatedToolNode(..., replay=hook)`: `hook(key)` returns the `RecordedReply(fingerprint,
+  content)` the tool stored when the call ran. On a re-run a call with a matching record gets its
+  stored reply and is not run again; a record with another fingerprint denies it
+  (`call_id_reused`).
+- A call that may already have run (`mandate:charge_ref_reused`,
+  `mandate:previous_amount_mismatch`, `call_id_reused`) gets a reply that tells the model to check
+  its status before retrying, not `Not executed`.
+
 [Unreleased]: https://github.com/jovandyaz/agent-toolkit/compare/v0.1.0a1...HEAD

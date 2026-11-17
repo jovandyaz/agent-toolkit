@@ -101,6 +101,10 @@ assert consumed_in_period(ledger, mandate, now) == mxn(20_000)
 - Keep one ledger per mandate. Pass `consumed` and `ref_state` from that ledger, never from tool
   arguments.
 - Mint a new charge's `charge_ref` server-side. `agent_id` comes from the session, not the model.
+- For an `amount_increase`, load `payer`, `receiving_account` and `rail` from the charge you
+  stored under its `charge_ref`; only the amounts come from tool arguments. `check` binds
+  `previous_amount` to the ledger, but cannot tell the payer, account or rail from the ones the
+  charge was issued with, so an increase naming an allowed payer would skip the payer approval.
 - The `HmacSha256Signer` key (32 bytes or more) is an application secret: keep it in a secrets
   manager, never in the repo.
 

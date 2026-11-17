@@ -9,6 +9,7 @@ from agent_toolkit.budgets import BudgetLimits, BudgetState
 from agent_toolkit.mandates import ClosedMandate
 from agent_toolkit.policy_gate import (
     Allow,
+    BuildContext,
     Decision,
     Deny,
     Effects,
@@ -27,7 +28,7 @@ class Args(BaseModel):
     customer_id: str
 
 
-def build(args: BaseModel, call_id: str) -> ClosedMandate:
+def build(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     raise AssertionError("never called by these tests")
 
 
@@ -60,6 +61,20 @@ def test_builder_on_a_non_financial_tool_is_rejected() -> None:
 def test_args_model_must_be_a_pydantic_model() -> None:
     with pytest.raises(ValidationError):
         ToolSpec.model_validate(spec(args_model=dict))
+
+
+def test_build_context_needs_every_id() -> None:
+    ctx = BuildContext(thread_id="thread_1", message_id="msg_1", call_id="call_1")
+
+    assert (ctx.thread_id, ctx.message_id, ctx.call_id) == ("thread_1", "msg_1", "call_1")
+    with pytest.raises(ValidationError):
+        BuildContext(thread_id="", message_id="msg_1", call_id="call_1")
+    with pytest.raises(ValidationError):
+        BuildContext(thread_id="thread_1", message_id="", call_id="call_1")
+    with pytest.raises(ValidationError):
+        BuildContext.model_validate({"thread_id": "thread_1", "call_id": "call_1"})
+    with pytest.raises(ValidationError):
+        setattr(ctx, "call_id", "call_2")  # noqa: B010 (frozen: mypy rejects plain assignment)
 
 
 def test_tool_call_keeps_a_snapshot_of_its_args() -> None:
