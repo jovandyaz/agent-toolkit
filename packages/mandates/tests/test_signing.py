@@ -20,17 +20,20 @@ from agent_toolkit.mandates import (
 T = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
 
 
-def charge(minor: int | None = 35000) -> ClosedMandate:
-    return ClosedMandate(
-        open_mandate_id="om_1",
-        kind="new_charge",
-        payer="cust-juan",
-        receiving_account="acct-own",
-        rail="codi_push",
-        amount=None if minor is None else Amount(minor=minor, currency="MXN"),
-        previous_amount=None,
-        reference="R-1001",
-    )
+def charge(minor: int | None = 35000, /, **overrides: str) -> ClosedMandate:
+    fields: dict[str, object] = {
+        "open_mandate_id": "om_1",
+        "agent_id": "agent_1",
+        "kind": "new_charge",
+        "charge_ref": "ch_1",
+        "payer": "cust-juan",
+        "receiving_account": "acct-own",
+        "rail": "codi_push",
+        "amount": None if minor is None else Amount(minor=minor, currency="MXN"),
+        "previous_amount": None,
+        "reference": "R-1001",
+    }
+    return ClosedMandate.model_validate(fields | overrides)
 
 
 def test_content_hash_is_stable_across_equal_instances() -> None:
@@ -42,12 +45,19 @@ def test_content_hash_changes_with_the_amount() -> None:
     assert charge(35000).content_hash != charge(None).content_hash
 
 
+@pytest.mark.parametrize(("field", "value"), [("agent_id", "agent_2"), ("charge_ref", "ch_2")])
+def test_content_hash_covers_the_agent_and_the_ledger_ref(field: str, value: str) -> None:
+    assert charge(**{field: value}).content_hash != charge().content_hash
+
+
 def test_content_hash_is_sha256_of_canonical_json() -> None:
     closed = charge()
     canonical = json.dumps(closed.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
     assert closed.content_hash == hashlib.sha256(canonical.encode()).hexdigest()
-    assert canonical.startswith('{"amount":{"currency":"MXN","minor":35000},"kind":"new_charge"')
+    assert canonical.startswith(
+        '{"agent_id":"agent_1","amount":{"currency":"MXN","minor":35000},"charge_ref":"ch_1",'
+    )
 
 
 def test_hmac_signer_verifies_its_own_signature() -> None:

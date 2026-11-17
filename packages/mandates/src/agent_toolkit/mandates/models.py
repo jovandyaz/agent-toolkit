@@ -146,15 +146,20 @@ class OpenMandate(BaseModel):
 class ClosedMandate(BaseModel):
     """One concrete charge the agent wants to issue under an open mandate.
 
-    `amount=None` is an open-amount request (the payer sets it). An `amount_increase` raises a
-    pending link from `previous_amount` to `amount`, both present, same currency, and strictly
-    greater; a `new_charge` has no `previous_amount`.
+    `agent_id` is the agent acting; `charge_ref` is the charge's key in the consumption ledger
+    (`ConsumptionEntry.charge_ref`). `amount=None` is an open-amount request (the payer sets
+    it). An `amount_increase` raises the pending link `charge_ref` from `previous_amount` to
+    `amount`, both present, same currency, and strictly greater; a `new_charge` has no
+    `previous_amount`. Fields that come from tool arguments are untrusted: `check` compares
+    `agent_id` and `previous_amount` against the mandate and the ledger.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     open_mandate_id: Identifier
+    agent_id: Identifier
     kind: ChargeKind
+    charge_ref: Identifier
     payer: Identifier
     receiving_account: Identifier
     rail: Identifier

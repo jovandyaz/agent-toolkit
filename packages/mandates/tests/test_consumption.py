@@ -14,6 +14,7 @@ from agent_toolkit.mandates import (
     ConsumptionEntry,
     OpenMandate,
     consumed_in_period,
+    reserved_for,
 )
 
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
@@ -197,3 +198,49 @@ def test_entry_rejects_invalid_fields(overrides: dict[str, object], message: str
 
     with pytest.raises(ValidationError, match=message):
         ConsumptionEntry.model_validate(fields | overrides)
+
+
+def test_reserved_for_an_unknown_ref_is_none() -> None:
+    assert reserved_for([], "ch_1") is None
+    assert reserved_for([reserve("ch_2", 30000)], "ch_1") is None
+
+
+def test_reserved_for_sums_every_reserve_of_the_ref() -> None:
+    entries = [reserve("link_1", 40000), reserve("ch_2", 5000), reserve("link_1", 10000)]
+
+    assert reserved_for(entries, "link_1") == mxn(50000)
+    assert reserved_for(entries, "ch_2") == mxn(5000)
+
+
+def test_reserved_for_a_released_ref_is_none() -> None:
+    entries = [reserve("link_1", 40000), reserve("link_1", 10000), release("link_1", 50000)]
+
+    assert reserved_for(entries, "link_1") is None
+
+
+def test_reserved_for_accepts_a_one_shot_iterator() -> None:
+    assert reserved_for(iter([reserve("ch_1", 30000)]), "ch_1") == mxn(30000)
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        ([reserve("ch_1", 30000), release("ch_2", 30000)], "no reserve"),
+        ([reserve("ch_2", 30000), release("ch_2", 30000), release("ch_2", 30000)], "twice"),
+        ([reserve("ch_2", 30000), release("ch_2", 20000)], "reserved"),
+    ],
+)
+def test_reserved_for_rejects_an_inconsistent_ledger_anywhere(
+    entries: list[ConsumptionEntry], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        reserved_for(entries, "ch_1")
+
+
+def test_reserved_for_rejects_a_ref_in_two_currencies() -> None:
+    usd = ConsumptionEntry(
+        charge_ref="ch_1", kind="reserve", amount=Amount(minor=1, currency="USD"), at=NOW
+    )
+
+    with pytest.raises(ValueError, match="currenc"):
+        reserved_for([reserve("ch_1", 30000), usd], "ch_1")

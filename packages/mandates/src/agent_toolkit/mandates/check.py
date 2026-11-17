@@ -11,9 +11,12 @@ Violation = Literal[
     "expired",
     "revoked",
     "mandate_mismatch",
+    "agent_mismatch",
     "account_not_allowed",
     "rail_not_allowed",
     "currency_mismatch",
+    "charge_ref_reused",
+    "previous_amount_mismatch",
     "amount_out_of_range",
     "budget_exceeded",
     "outside_window",
@@ -45,23 +48,37 @@ def reserve_amount(closed: ClosedMandate) -> Amount | None:
     return Amount(minor=delta, currency=closed.amount.currency)
 
 
-def check(closed: ClosedMandate, open: OpenMandate, consumed: Amount, now: datetime) -> Verdict:
+def check(
+    closed: ClosedMandate,
+    open: OpenMandate,
+    consumed: Amount,
+    now: datetime,
+    *,
+    reserved_for_ref: Amount | None,
+) -> Verdict:
     """Judge whether `closed` fits `open` at `now`, given the budget `consumed` this period.
 
-    `consumed` comes from the caller (see `consumed_in_period`) and already includes what a
-    pending link reserved before an increase. All violations are collected. An open amount
-    needs approval and skips the range and budget checks, since nothing bounds it. Raises
-    ValueError when `now` is naive.
+    The caller reads both amounts from its trusted ledger, never from tool arguments:
+    `consumed` from `consumed_in_period` (it already includes what a pending link reserved
+    before an increase) and `reserved_for_ref` from `reserved_for(entries, closed.charge_ref)`.
+    A new charge must have nothing reserved for its ref; an increase's claimed `previous_amount`
+    must equal the reserve, which is what makes the budget delta `amount - previous_amount`
+    trustworthy. All violations are collected. An open amount needs approval and skips the
+    range and budget checks, since nothing bounds it. Raises ValueError when `now` is naive.
     """
     require_aware(now, "now")
     return Verdict(
-        violations=_violations(closed, open, consumed, now),
+        violations=_violations(closed, open, consumed, now, reserved_for_ref),
         approval_reasons=_approval_reasons(closed, open),
     )
 
 
 def _violations(
-    closed: ClosedMandate, mandate: OpenMandate, consumed: Amount, now: datetime
+    closed: ClosedMandate,
+    mandate: OpenMandate,
+    consumed: Amount,
+    now: datetime,
+    reserved_for_ref: Amount | None,
 ) -> tuple[Violation, ...]:
     charge_amounts = [a for a in (closed.amount, closed.previous_amount) if a is not None]
     charge_currency_ok = all(a.currency == mandate.currency for a in charge_amounts)
@@ -75,12 +92,18 @@ def _violations(
         found.append("revoked")
     if closed.open_mandate_id != mandate.id:
         found.append("mandate_mismatch")
+    if closed.agent_id != mandate.agent_id:
+        found.append("agent_mismatch")
     if closed.receiving_account not in mandate.receiving_accounts:
         found.append("account_not_allowed")
     if closed.rail not in mandate.allowed_rails:
         found.append("rail_not_allowed")
     if not (charge_currency_ok and consumed_currency_ok):
         found.append("currency_mismatch")
+    if closed.kind == "new_charge" and reserved_for_ref is not None:
+        found.append("charge_ref_reused")
+    if closed.kind == "amount_increase" and reserved_for_ref != closed.previous_amount:
+        found.append("previous_amount_mismatch")
     # Amounts in another currency cannot be bounded; currency_mismatch already rejects them.
     if (
         closed.amount is not None

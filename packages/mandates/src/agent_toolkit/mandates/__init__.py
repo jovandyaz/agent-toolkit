@@ -13,7 +13,12 @@ from agent_toolkit.mandates.check import (
     check,
     reserve_amount,
 )
-from agent_toolkit.mandates.consumption import ConsumptionEntry, EntryKind, consumed_in_period
+from agent_toolkit.mandates.consumption import (
+    ConsumptionEntry,
+    EntryKind,
+    consumed_in_period,
+    reserved_for,
+)
 from agent_toolkit.mandates.models import (
     Amount,
     AmountRange,
@@ -54,4 +59,5 @@ __all__ = [
     "check",
     "consumed_in_period",
     "reserve_amount",
+    "reserved_for",
 ]

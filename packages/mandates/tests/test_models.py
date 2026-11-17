@@ -47,7 +47,9 @@ def mandate_fields(**overrides: object) -> dict[str, object]:
 def charge_fields(**overrides: object) -> dict[str, object]:
     fields: dict[str, object] = {
         "open_mandate_id": "om_1",
+        "agent_id": "agent_1",
         "kind": "new_charge",
+        "charge_ref": "ch_1",
         "payer": "cust-juan",
         "receiving_account": "acct-own",
         "rail": "codi_push",
@@ -152,6 +154,8 @@ def test_a_consistent_charge_is_accepted() -> None:
         ({"amount": mxn(0)}, "positive"),
         ({"kind": "amount_increase", "previous_amount": mxn(0)}, "positive"),
         ({"payer": ""}, "at least 1 character"),
+        ({"agent_id": ""}, "at least 1 character"),
+        ({"charge_ref": ""}, "at least 1 character"),
         ({"kind": "refund"}, "kind"),
     ],
 )
@@ -165,3 +169,12 @@ def test_models_are_frozen() -> None:
 
     with pytest.raises(ValidationError):
         closed.amount = mxn(1)  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("field", ["agent_id", "charge_ref"])
+def test_charge_names_its_agent_and_ledger_ref(field: str) -> None:
+    fields = charge_fields()
+    del fields[field]
+
+    with pytest.raises(ValidationError, match=field):
+        ClosedMandate.model_validate(fields)
