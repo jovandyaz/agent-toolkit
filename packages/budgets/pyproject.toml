@@ -1,0 +1,17 @@
+[project]
+name = "agent-toolkit-budgets"
+version = "0.1.0a1"
+description = "Run budgets for agents: caps on iterations, tool calls, tokens, USD cost and consecutive failures."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=1.8,<2"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.budgets"
