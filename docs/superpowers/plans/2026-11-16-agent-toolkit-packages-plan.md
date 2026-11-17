@@ -270,7 +270,7 @@ def test_money_add_requires_same_currency():
 - Produces:
   - `ActorKind = Literal["agent", "human", "system"]`
   - `AuditEvent(seq: int, actor_id, actor_kind, action, subject, payload_hash: str, decision: str | None, at: datetime, prev_hash: str, hash: str)`; génesis `prev_hash = "0" * 64`; `hash` = sha256 del JSON canónico de los demás campos.
-  - `hash_payload(payload: bytes) -> str`
+  - `hash_payload(payload: bytes, key: bytes) -> str` (R35: HMAC-SHA256 hex, para que un payload de baja entropía, como un teléfono, no se recupere probando candidatos; `ValueError` si la clave tiene menos de 32 bytes. La clave es un secreto de la app, en el gestor de secretos o el Keychain, nunca en el repo; rotarla impide recomputar los hashes hechos con la clave anterior)
   - `next_event(prev: AuditEvent | None, *, actor_id, actor_kind, action, subject, payload_hash, decision, at) -> AuditEvent`
   - Protocol `AuditStore`: `last() -> AuditEvent | None`, `append(event) -> None` (lanza `ChainConflict` si `event.prev_hash` ≠ hash del último), `iter_all() -> Iterator[AuditEvent]`
   - `append(store: AuditStore, **fields) -> AuditEvent`

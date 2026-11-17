@@ -7,7 +7,8 @@ and ASI09: immutable logs). Event `seq` starts at 1 and grows by one; each event
 `hash` is the SHA-256 of the canonical JSON of every other field. Changing, removing or reordering
 any event therefore breaks the chain at that point, and `verify_chain` reports where.
 
-No PII in clear: the payload itself is never stored, only `payload_hash` (see `hash_payload`).
+No PII in clear: the payload itself is never stored, only `payload_hash`, a keyed hash (see
+`hash_payload`) that nobody without the key can recompute or test guesses against.
 `actor_id` and `subject` are references (ids such as an agent id or a charge id), never names,
 phone numbers or account numbers.
 
@@ -17,6 +18,7 @@ A hash chain cannot show that its newest events were removed. Stores make the lo
 """
 
 import hashlib
+import hmac
 import json
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
@@ -28,6 +30,8 @@ ActorKind = Literal["agent", "human", "system"]
 
 GENESIS_HASH = "0" * 64
 """`prev_hash` of the first event (`seq == 1`)."""
+
+_MIN_PAYLOAD_KEY_BYTES = 32
 
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
@@ -112,13 +116,17 @@ class AuditStore(Protocol):
         ...
 
 
-def hash_payload(payload: bytes) -> str:
-    """SHA-256 hex of `payload`: what an event stores instead of the payload itself.
+def hash_payload(payload: bytes, key: bytes) -> str:
+    """HMAC-SHA256 hex of `payload` under `key`: what an event stores instead of the payload.
 
-    A bare low-entropy value (a phone number, an account number) can be recovered from its
-    plain hash by trying every candidate, so hash the whole serialized payload, never one field.
+    Keyed, so a low-entropy payload (a phone or account number) cannot be recovered by hashing
+    every candidate. `key` is an app secret of at least 32 bytes (ValueError otherwise), kept in
+    the secrets manager or the Keychain and never in the repo. Rotating it means hashes made with
+    the old key can no longer be recomputed, so payloads cannot be matched to old events.
     """
-    return hashlib.sha256(payload).hexdigest()
+    if len(key) < _MIN_PAYLOAD_KEY_BYTES:
+        raise ValueError(f"payload key must be at least {_MIN_PAYLOAD_KEY_BYTES} bytes")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 def next_event(

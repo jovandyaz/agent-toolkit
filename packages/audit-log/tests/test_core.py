@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -18,7 +19,8 @@ from agent_toolkit.audit_log import (
 from agent_toolkit.audit_log.testing import InMemoryAuditStore
 
 T0 = datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
-PAYLOAD_HASH = hash_payload(b'{"charge_id":"ch_1","amount_minor":35000}')
+PAYLOAD_KEY = bytes(range(32))  # test-only key; real keys live in a secrets manager
+PAYLOAD_HASH = hash_payload(b'{"charge_id":"ch_1","amount_minor":35000}', PAYLOAD_KEY)
 
 
 def _event(prev: AuditEvent | None, n: int, decision: str | None = "allow") -> AuditEvent:
@@ -85,12 +87,24 @@ def test_at_is_stored_in_utc_so_the_hash_ignores_the_zone() -> None:
     assert event.hash == _event(None, 1).hash
 
 
-def test_hash_payload_is_sha256_hex_and_never_contains_the_payload() -> None:
+def test_hash_payload_is_hmac_sha256_hex_without_the_payload() -> None:
     phone = "5512345678"
     payload = f'{{"payer_phone":"{phone}","amount_minor":35000}}'.encode()
-    digest = hash_payload(payload)
-    assert digest == hashlib.sha256(payload).hexdigest()
+    digest = hash_payload(payload, PAYLOAD_KEY)
+    assert digest == hmac.new(PAYLOAD_KEY, payload, hashlib.sha256).hexdigest()
     assert phone not in digest
+    assert digest != hashlib.sha256(payload).hexdigest()  # not recomputable without the key
+
+
+def test_same_payload_with_different_keys_hashes_differently() -> None:
+    payload = b'{"payer_phone":"5512345678"}'
+    assert hash_payload(payload, b"a" * 32) != hash_payload(payload, b"b" * 32)
+
+
+@pytest.mark.parametrize("length", [0, 16, 31])
+def test_hash_payload_rejects_a_short_key(length: int) -> None:
+    with pytest.raises(ValueError, match="32 bytes"):
+        hash_payload(b"{}", b"k" * length)
 
 
 @pytest.mark.parametrize(

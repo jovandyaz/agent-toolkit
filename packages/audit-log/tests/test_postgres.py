@@ -37,7 +37,8 @@ SCHEMA_SQL = resources.files("agent_toolkit.audit_log.adapters").joinpath("schem
 REVOKE = "REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM {}"
 
 T0 = datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
-PAYLOAD_HASH = hash_payload(b'{"charge_id":"ch_1","amount_minor":35000}')
+PAYLOAD_KEY = bytes(range(32))  # test-only key; real keys live in a secrets manager
+PAYLOAD_HASH = hash_payload(b'{"charge_id":"ch_1","amount_minor":35000}', PAYLOAD_KEY)
 
 
 def _connect(schema: str, *, autocommit: bool = True) -> psycopg.Connection[TupleRow]:
