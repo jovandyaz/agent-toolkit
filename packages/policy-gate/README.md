@@ -179,7 +179,8 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)
   never from the arguments. A random ref voids every approval (fails closed).
 - Execute exactly the returned `closed` (the tool reads it with `closed_mandate_from_config`) and
   reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent on it.
-- Wire `on_decision` to `audit-log`, once per call with its final outcome.
+- Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per call
+  with its final decision, before the call runs, so an audit log that fails blocks the call.
 - Resume only from the trusted approval screen through an authenticated channel, never from chat
   text. The `request_hash` is an integrity binding, not authentication.
 - The stock `ToolNode` with `handle_tool_errors` swallows `BudgetExceededError`; keep the budget

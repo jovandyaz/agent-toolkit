@@ -40,13 +40,16 @@ node never looks further back, so re-entering it cannot run a turn twice), and n
    of the tool's config; a financial tool reads it with `closed_mandate_from_config` and
    issues exactly that charge. Every other call gets
    `ToolMessage(status="error", content="Not executed: <reasons>")`.
-5. Calls `on_decision(call, decision, approval)` once per call with its final outcome: `Allow`,
-   or `RequireApproval` with the approval that let it run, once the tool ran or raised (a
-   failed call is reported, then its error propagates); or `Deny` for a call that does not
-   run, before any tool runs. A rejection's reasons are its `approval_*` code followed by the
-   gate's, and it carries the human's answer if there was one. Calls after a failed one are
-   neither run nor reported; running the thread again decides and reports them. The
-   application wires `on_decision` to `audit-log`; its exceptions propagate.
+5. Calls `on_decision(call, decision, approval)` once per call with its final decision, always
+   before the call would run: first a `Deny` for every call that does not run, before any
+   tool runs; then, right before each call runs, `Allow`, or `RequireApproval` with the
+   approval that lets it run. So an `on_decision` that raises stops its call, and every call
+   after it, from running: an audit log that cannot record a charge blocks it. A rejection's
+   reasons are its `approval_*` code followed by the gate's, and it carries the human's answer
+   if there was one. The report is the decision, not the result: a call that then fails was
+   reported as allowed. Calls after a failed one are neither reported nor run; running the
+   thread again decides and reports them. The application wires `on_decision` to `audit-log`;
+   its exceptions propagate.
 
 Resume with `graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)`; JSON works
 too (`at` takes an ISO 8601 string). LangGraph reads a dict whose keys all look like interrupt
@@ -249,10 +252,8 @@ class GatedToolNode[StateT: Mapping[str, object]]:
             if isinstance(outcome.decision, Deny):
                 replies.append(_refusal(outcome.call, outcome.decision))
                 continue
-            try:
-                replies.append(self._run(outcome.call, outcome.decision, config))
-            finally:  # A call that raised is reported too, then its error propagates.
-                self._report(outcome)
+            self._report(outcome)  # Before it runs: a failing audit log stops the call.
+            replies.append(self._run(outcome.call, outcome.decision, config))
         return {"messages": replies}
 
     def _decide_in_order(

@@ -244,6 +244,7 @@ class Rig:
     context: GateContext = field(default_factory=gate_context)
     reports: list[Report] = field(default_factory=list)
     ran_at_report: list[tuple[str, int]] = field(default_factory=list)
+    audit_error: Exception | None = None  # Raised by `record`, as a failing audit log would.
     contexts_built: int = 0
     thread: RunnableConfig = field(
         default_factory=lambda: RunnableConfig(configurable={"thread_id": str(uuid.uuid4())})
@@ -278,6 +279,8 @@ class Rig:
         return self.context
 
     def record(self, call: ToolCall, decision: Decision, approval: ApprovalDecision | None) -> None:
+        if self.audit_error is not None:
+            raise self.audit_error
         self.reports.append((call, decision, approval))
         self.ran_at_report.append((call.id, self.total_runs()))
 
@@ -443,8 +446,8 @@ def test_on_decision_called_once_per_call() -> None:
         Deny(reasons=("approval_rejected", "high_risk")),
         answer(reject, approved=False),
     )
-    # Calls that do not run are reported before any tool runs; the others after they ran.
-    assert rig.ran_at_report == [("c3", 0), ("c4", 0), ("c1", 1), ("c2", 2)]
+    # Calls that do not run are reported before any tool runs; the others right before they run.
+    assert rig.ran_at_report == [("c3", 0), ("c4", 0), ("c1", 0), ("c2", 1)]
 
 
 # Resume values.
@@ -978,6 +981,7 @@ def test_tool_error_propagates_after_its_call_is_reported() -> None:
             turn(call("lookup_customer", "c1"), call("lookup_customer", "c2")), rig.thread
         )
     assert [(c.id, d.kind, a) for c, d, a in rig.reports] == [("c1", "allow", None)]
+    assert rig.ran_at_report == [("c1", 0)]  # Reported before it ran; c2 never ran.
 
 
 def test_tool_that_handles_its_errors_replies_with_an_error() -> None:
@@ -1007,6 +1011,28 @@ def test_on_decision_error_propagates() -> None:
 
     with pytest.raises(RuntimeError, match="audit log unavailable"):
         rig.graph(node).invoke(turn(call("lookup_customer", "c1")), rig.thread)
+
+
+def test_audit_failure_blocks_an_allowed_call() -> None:
+    # The decision is reported before the call runs: an audit log that cannot record it stops
+    # the charge, instead of failing after the money moved.
+    rig = Rig(audit_error=RuntimeError("audit log unavailable"))
+    allowed = call("request_payment", "c1", payer="cust-juan", amount_minor=35000)
+
+    with pytest.raises(RuntimeError, match="audit log unavailable"):
+        rig.graph().invoke(turn(allowed), rig.thread)
+    assert rig.charge.runs == []
+
+
+def test_audit_failure_blocks_an_approved_call() -> None:
+    rig = Rig(audit_error=RuntimeError("audit log unavailable"))
+    graph = rig.graph()
+    open_amount = call("request_payment", "c1", payer="cust-juan")
+    (request,) = pending(graph.invoke(turn(open_amount), rig.thread))  # Reports nothing yet.
+
+    with pytest.raises(RuntimeError, match="audit log unavailable"):
+        graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+    assert rig.charge.runs == []
 
 
 def test_budget_exceeded_in_a_tool_callback_stops_the_run() -> None:
