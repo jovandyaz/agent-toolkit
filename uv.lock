@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "agent-toolkit-audit-log",
     "agent-toolkit-budgets",
+    "agent-toolkit-evals",
     "agent-toolkit-mandates",
     "agent-toolkit-payments-core",
     "agent-toolkit-policy-gate",
@@ -67,6 +68,26 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14,<3" },
 ]
 provides-extras = ["langchain"]
+
+[[package]]
+name = "agent-toolkit-evals"
+version = "0.1.0a1"
+source = { editable = "packages/evals" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+pytest = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.14,<3" },
+    { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2,<10" },
+]
+provides-extras = ["pytest"]
 
 [[package]]
 name = "agent-toolkit-mandates"
