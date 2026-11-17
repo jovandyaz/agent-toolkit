@@ -313,10 +313,10 @@ Herramienta base [decisión del plan, dentro del criterio de 7.5]: runner propio
 **Files:**
 - Create/Modify: `packages/*/README.md` (propósito, contrato, ejemplo mínimo, referente que lo justifica, límites), `README.md` raíz (mapa de paquetes, regla de dependencias, cómo instalar por git tag), `CHANGELOG.md`
 
-- [ ] **Step 1:** Ejemplo de cada README como doctest o test (`pytest --doctest-glob="*.md"`). Run → PASS.
-- [ ] **Step 2:** `uv build --all-packages` genera 7 wheels; instalar cada wheel en un venv limpio y `python -c "import agent_toolkit.<pkg>"` sin extras → OK (prueba que el núcleo no requiere extras).
-- [ ] **Step 3:** Prueba de consumo como la app: proyecto temporal fuera del repo con dependencia `agent-toolkit-policy-gate[langgraph] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0rc1#subdirectory=packages/policy-gate`; `uv sync` resuelve también `mandates` y `budgets`. Si la resolución de dependencias entre paquetes por git falla, documentar en el README raíz la forma que sí funciona.
-- [ ] **Step 4:** Commit `docs: add package readmes and changelog for v0.1.0`; merge; tag `v0.1.0`.
+- [x] **Step 1:** Ejemplo de cada README como doctest o test (`pytest --doctest-glob="*.md"`). Run → PASS.
+- [x] **Step 2:** `uv build --all-packages` genera 7 wheels; instalar cada wheel en un venv limpio y `python -c "import agent_toolkit.<pkg>"` sin extras → OK (prueba que el núcleo no requiere extras).
+- [x] **Step 3:** Prueba de consumo como la app: proyecto temporal fuera del repo con dependencia `agent-toolkit-policy-gate[langgraph] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0rc1#subdirectory=packages/policy-gate`; `uv sync` resuelve también `mandates` y `budgets`. Si la resolución de dependencias entre paquetes por git falla, documentar en el README raíz la forma que sí funciona.
+- [ ] **Step 4:** Commit `docs: add package readmes and changelog for v0.1.0`; merge; tag `v0.1.0`. (Commit hecho; el merge, el bump de versiones y el tag los hace el controlador con aprobación del usuario.)
 
 ## Entregas a la app
 
