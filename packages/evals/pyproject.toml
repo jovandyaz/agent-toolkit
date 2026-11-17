@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-evals"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 description = "Minimal eval runner for agents: deterministic final-state graders, k isolated attempts, pass@k and pass^k."
 requires-python = ">=3.12"
 license = "Apache-2.0"

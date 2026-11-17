@@ -31,7 +31,7 @@ dev = [
 
 [[package]]
 name = "agent-toolkit-audit-log"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/audit-log" }
 dependencies = [
     { name = "pydantic" },
@@ -51,7 +51,7 @@ provides-extras = ["postgres"]
 
 [[package]]
 name = "agent-toolkit-budgets"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/budgets" }
 dependencies = [
     { name = "pydantic" },
@@ -71,7 +71,7 @@ provides-extras = ["langchain"]
 
 [[package]]
 name = "agent-toolkit-evals"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/evals" }
 dependencies = [
     { name = "pydantic" },
@@ -91,7 +91,7 @@ provides-extras = ["pytest"]
 
 [[package]]
 name = "agent-toolkit-mandates"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/mandates" }
 dependencies = [
     { name = "pydantic" },
@@ -106,7 +106,7 @@ requires-dist = [
 
 [[package]]
 name = "agent-toolkit-payments-core"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/payments-core" }
 dependencies = [
     { name = "pydantic" },
@@ -117,7 +117,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
 
 [[package]]
 name = "agent-toolkit-policy-gate"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/policy-gate" }
 dependencies = [
     { name = "agent-toolkit-budgets" },
@@ -141,7 +141,7 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "agent-toolkit-webhooks"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 source = { editable = "packages/webhooks" }
 dependencies = [
     { name = "pydantic" },

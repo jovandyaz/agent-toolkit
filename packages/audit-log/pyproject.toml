@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-audit-log"
-version = "0.1.0a1"
+version = "0.1.0rc1"
 description = "Append-only, hash-chained audit log of agent decisions, approvals and effects, with actor identity."
 requires-python = ">=3.12"
 license = "Apache-2.0"
