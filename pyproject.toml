@@ -9,6 +9,7 @@ dev = [
     "mypy>=2.4,<3",
     "import-linter>=2.16,<3",
     "pydantic>=2.14,<3",  # needed by the pydantic.mypy plugin
+    "langchain-core>=1.8,<2",  # dev and tests of the budgets langchain adapter
 ]
 
 [tool.ruff]
@@ -37,7 +38,7 @@ markers = ["postgres: needs DATABASE_URL pointing to a disposable Postgres"]
 # Cores must stay framework-free. Adapters (agent_toolkit.<pkg>.adapters.*) are the only exception.
 # Each package adds its namespace portion to root_packages when it lands.
 [tool.importlinter]
-root_packages = ["agent_toolkit.payments_core", "agent_toolkit.webhooks", "agent_toolkit.mandates"]
+root_packages = ["agent_toolkit.payments_core", "agent_toolkit.webhooks", "agent_toolkit.mandates", "agent_toolkit.budgets"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
