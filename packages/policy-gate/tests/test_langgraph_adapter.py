@@ -21,7 +21,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, Interrupt
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from agent_toolkit.budgets import BudgetLimits, BudgetState
 from agent_toolkit.budgets.adapters.langchain import BudgetCallbackHandler, BudgetExceededError
@@ -305,13 +305,16 @@ def turn(*calls: LcToolCall) -> dict[str, list[AnyMessage]]:
     return {"messages": [AIMessage(content="", tool_calls=list(calls))]}
 
 
+REQUESTS = TypeAdapter(list[ApprovalRequest])
+
+
 def pending(result: dict[str, Any]) -> list[ApprovalRequest]:
+    """The requests of the turn's interrupt, read back from its JSON value."""
     (raised,) = result["__interrupt__"]
     assert isinstance(raised, Interrupt)
-    requests = raised.value
-    assert isinstance(requests, list)
-    assert all(isinstance(request, ApprovalRequest) for request in requests)
-    return requests
+    assert isinstance(raised.value, list)
+    assert all(isinstance(request, dict) for request in raised.value)
+    return REQUESTS.validate_json(json.dumps(raised.value))
 
 
 def answer(request: ApprovalRequest, *, approved: bool = True) -> ApprovalDecision:
@@ -363,6 +366,7 @@ def test_approval_interrupts_then_executes_on_approved_resume() -> None:
     assert request.args == {"customer_id": "cust-c1"}
     assert request.reasons == ("high_risk",)
     assert request.closed_mandate_hash is None
+    assert request.closed is None
     assert len(request.request_hash) == 64
     assert rig.delete.runs == []
 
@@ -370,6 +374,39 @@ def test_approval_interrupts_then_executes_on_approved_resume() -> None:
 
     assert rig.delete.runs == [{"customer_id": "cust-c1"}]
     assert replies(resumed)["c1"].status == "success"
+
+
+def test_interrupt_value_is_plain_json() -> None:
+    # LangGraph requires a JSON-serializable interrupt value; the checkpoint keeps it as is.
+    rig = Rig()
+    graph = rig.graph()
+    calls = turn(call("delete_customer", "c1"), call("request_payment", "c2", payer="cust-juan"))
+
+    (raised,) = graph.invoke(calls, rig.thread)["__interrupt__"]
+
+    value = raised.value
+    assert json.loads(json.dumps(value)) == value
+    assert [sorted(request) for request in value] == 2 * [
+        ["args", "call_id", "closed", "closed_mandate_hash", "reasons", "request_hash", "tool"]
+    ]
+    assert value[0]["reasons"] == ["high_risk"]
+    assert value[1]["closed"]["amount"] is None
+    assert graph.get_state(rig.thread).interrupts[0].value == value
+
+
+def test_approval_request_shows_the_charge_that_will_run() -> None:
+    rig = Rig()
+    graph = rig.graph()
+    open_amount = call("request_payment", "c1", payer="cust-juan")
+    (request,) = pending(graph.invoke(turn(open_amount), rig.thread))
+
+    assert request.closed == rig.built(ChargeArgs(payer="cust-juan"), "c1")
+    assert request.closed is not None
+    assert request.closed.content_hash == request.closed_mandate_hash
+
+    graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+
+    assert rig.charge.closed_seen == [request.closed]
 
 
 def test_resume_executes_each_tool_once() -> None:

@@ -148,8 +148,8 @@ so it is not run here:
 from agent_toolkit.policy_gate.adapters.langgraph import GatedToolNode
 
 builder.add_node("tools", GatedToolNode(tools, specs, context=build_context, on_decision=audit))
-# Resume a paused turn from the trusted approval screen only:
-graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)
+# Resume a paused turn from the trusted approval screen only, with JSON:
+graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="json")}), config)
 ```
 
 ## Contracts
@@ -165,8 +165,11 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)
 - `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` and `outside_window` follow
   `GateConfig.on_mandate_violation`; every other violation (foreign account, wrong agent or
   currency, expired or revoked mandate, ledger contradictions) is always denied.
-- The LangGraph adapter pauses with one `interrupt` per turn. An approval binds the thread, call,
-  tool, validated arguments, closed mandate and reasons through a `request_hash`.
+- The LangGraph adapter pauses with one `interrupt` per turn. Its value is plain JSON: a list with
+  one `ApprovalRequest.model_dump(mode="json")` per call needing approval, with keys `call_id`,
+  `tool`, `args`, `reasons`, `closed` (the charge as it will run, or null), `closed_mandate_hash`
+  and `request_hash`. An approval binds the thread, call, tool, validated arguments, closed
+  mandate and reasons through the `request_hash`; resume with a JSON `ApprovalDecision`.
 
 ## Caller duties
 

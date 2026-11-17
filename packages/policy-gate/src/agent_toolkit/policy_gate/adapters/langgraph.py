@@ -20,8 +20,12 @@ node never looks further back, so re-entering it cannot run a turn twice), and n
    that is not deterministic cannot slip a second change past it. All of this is pure and
    deterministic, so the re-run on resume rebuilds the same decisions and hashes. A call to a
    tool missing from `tools` or `specs` is denied (`unknown_tool`).
-2. If calls need approval, pauses the graph with one `interrupt` whose value is the list of
-   their `ApprovalRequest`s. Nothing has run yet.
+2. If calls need approval, pauses the graph with one `interrupt` whose value is plain JSON, as
+   LangGraph requires: a list with one `ApprovalRequest.model_dump(mode="json")` per call,
+   `{"call_id", "tool", "args", "reasons", "closed_mandate_hash", "closed", "request_hash"}`,
+   where `closed` is the charge a financial call will issue (null for others). The approval
+   screen reads one back with `ApprovalRequest.model_validate_json(json.dumps(item))`.
+   Nothing has run yet.
 3. On resume LangGraph re-runs the node from its start, so steps 1 and 2 repeat with a fresh
    context and `interrupt` returns the resume value, a `dict[call_id, ApprovalDecision]`. An
    approval counts only if its `request_hash` equals the one recomputed now, which binds the
@@ -51,12 +55,14 @@ node never looks further back, so re-entering it cannot run a turn twice), and n
    thread again decides and reports them. The application wires `on_decision` to `audit-log`;
    its exceptions propagate.
 
-Resume with `graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)`; JSON works
-too (`at` takes an ISO 8601 string). LangGraph reads a dict whose keys all look like interrupt
-ids (32 lowercase hex characters), the empty dict included, as answers keyed by interrupt id:
-it answers nothing and the graph interrupts again. Key the answers by the interrupt to avoid
-that, `Command(resume={interrupt.id: {call_id: ...}})`, as LangGraph requires anyway while
-several interrupts are pending.
+Resume with `graph.invoke(Command(resume={call_id: decision.model_dump(mode="json")}), config)`,
+`decision` an `ApprovalDecision` (its `at` then travels as an ISO 8601 string): the checkpoint
+stores the resume value, so keep it JSON too (an `ApprovalDecision` object is also accepted).
+LangGraph reads a dict whose keys all look like interrupt ids (32 lowercase hex characters),
+the empty dict included, as answers keyed by interrupt id: it answers nothing and the graph
+interrupts again. Key the answers by the interrupt to avoid that,
+`Command(resume={interrupt.id: {call_id: ...}})`, as LangGraph requires anyway while several
+interrupts are pending.
 
 Duties of the application:
 
@@ -155,11 +161,12 @@ def closed_mandate_from_config(config: RunnableConfig) -> ClosedMandate | None:
 class ApprovalRequest(BaseModel):
     """One call waiting for a human, as the trusted approval screen shows it.
 
-    `args` are the validated arguments the call will run with; `closed_mandate_hash` is the
-    `content_hash` of the charge a financial call will issue. `request_hash` is the SHA-256 hex
-    of the canonical JSON (sorted keys, no spaces) of every other field, `reasons` included so
-    an approval never covers a reason it did not show, plus the graph's thread id so it never
-    covers another thread; an `ApprovalDecision` echoes it.
+    `args` are the validated arguments the call will run with; `closed` is the charge a
+    financial call will issue, exactly as the tool gets it (None for a call without one), and
+    `closed_mandate_hash` its `content_hash`. `request_hash` is the SHA-256 hex of the canonical
+    JSON (sorted keys, no spaces) of every other field but `closed`, which its hash binds,
+    `reasons` included so an approval never covers a reason it did not show, plus the graph's
+    thread id so it never covers another thread; an `ApprovalDecision` echoes it.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
@@ -169,6 +176,7 @@ class ApprovalRequest(BaseModel):
     args: dict[str, object]
     reasons: tuple[Identifier, ...]
     closed_mandate_hash: str | None
+    closed: ClosedMandate | None
     request_hash: Identifier
 
 
@@ -399,6 +407,7 @@ def _request(call: ToolCall, decision: RequireApproval, thread_id: str) -> Appro
         args=args,
         reasons=decision.reasons,
         closed_mandate_hash=closed_hash,
+        closed=decision.closed,
         request_hash=hashlib.sha256(canonical.encode()).hexdigest(),
     )
 
@@ -407,7 +416,7 @@ def _ask(requests: list[ApprovalRequest]) -> dict[str, ApprovalDecision] | None:
     """The human's answers by call id: empty if nothing needs one, None if malformed."""
     if not requests:
         return {}
-    resumed = interrupt(requests)
+    resumed = interrupt([request.model_dump(mode="json") for request in requests])
     try:
         return _ANSWERS.validate_python(resumed)
     except ValidationError:
