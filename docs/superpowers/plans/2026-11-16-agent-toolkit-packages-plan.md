@@ -139,18 +139,19 @@ def test_money_add_requires_same_currency():
 - Produces:
   - `Amount(minor: int, currency: str)` (propio; no depende de `payments-core`).
   - `AmountRange(min: Amount, max: Amount)`; `Budget(limit: Amount, period: Literal["day", "week", "month", "total"])`; `DailyWindow(start: time, end: time)`.
-  - `OpenMandate(id, principal_id, agent_id, purpose, amount_range, budget, receiving_accounts: frozenset[str], allowed_payers: frozenset[str], allowed_rails: frozenset[str], daily_window: DailyWindow | None, tz: str, expires_at: datetime, revoked_at: datetime | None)`; validación: `receiving_accounts` no vacío; monedas iguales en rango y presupuesto; `tz` válida (`zoneinfo`).
-  - `ClosedMandate(open_mandate_id, kind: Literal["new_charge", "amount_increase"], payer: str, receiving_account: str, rail: str, amount: Amount | None, previous_amount: Amount | None, reference: str)`; propiedad `content_hash: str` (sha256 de JSON canónico, `sort_keys`, sin espacios).
-  - `Violation = Literal["expired", "revoked", "mandate_mismatch", "account_not_allowed", "rail_not_allowed", "currency_mismatch", "amount_out_of_range", "budget_exceeded", "outside_window"]`; `ApprovalReason = Literal["payer_not_allowed", "open_amount"]`.
+  - `OpenMandate(id, principal_id, agent_id, purpose, amount_range, budget, receiving_accounts: frozenset[str], allowed_payers: frozenset[str], allowed_rails: frozenset[str], daily_window: DailyWindow | None, tz: str, expires_at: datetime, revoked_at: datetime | None)`; validación: `receiving_accounts` no vacío; monedas iguales en rango y presupuesto; `tz` válida por pertenencia exacta a `zoneinfo.available_timezones()` (dep `tzdata`; sin `localtime`, `Factory` ni `posixrules`; `america/mexico_city` se rechaza en todo SO).
+  - `ClosedMandate(open_mandate_id, agent_id: str, kind: Literal["new_charge", "amount_increase"], charge_ref: str, payer: str, receiving_account: str, rail: str, amount: Amount | None, previous_amount: Amount | None, reference: str)`; `charge_ref` es la clave del cobro en `ConsumptionEntry`; propiedad `content_hash: str` (sha256 de JSON canónico, `sort_keys`, sin espacios; cubre `agent_id` y `charge_ref`).
+  - `Violation = Literal["expired", "revoked", "mandate_mismatch", "agent_mismatch", "account_not_allowed", "rail_not_allowed", "currency_mismatch", "charge_ref_reused", "previous_amount_mismatch", "amount_out_of_range", "budget_exceeded", "outside_window"]`; `ApprovalReason = Literal["payer_not_allowed", "open_amount"]`.
   - `Verdict(violations: tuple[Violation, ...], approval_reasons: tuple[ApprovalReason, ...])`, propiedad `ok` (ambas vacías).
   - `reserve_amount(closed: ClosedMandate) -> Amount | None` (nuevo → monto; aumento → `amount - previous_amount`; abierto → `None`).
-  - `check(closed: ClosedMandate, open: OpenMandate, consumed: Amount, now: datetime) -> Verdict`
+  - `check(closed: ClosedMandate, open: OpenMandate, consumed: Amount, now: datetime, *, ref_state: RefState) -> Verdict` (R14/R18: `consumed` y `ref_state` salen del ledger de este mandato, nunca de argumentos de herramienta; `agent_mismatch` si `closed.agent_id != open.agent_id`; `charge_ref_reused` si un `new_charge` tiene `ref_state.status != "unknown"` (reservada o liberada); `previous_amount_mismatch` si un `amount_increase` tiene `status != "reserved"` o `reserved != closed.previous_amount`. El delta `amount - previous_amount` es confiable solo por esta comparación. El llamador bloquea el mandato desde leer el ledger hasta registrar la reserva: dos `check` sobre el mismo `consumed` pueden pasar ambos. La app genera `charge_ref` del lado del servidor).
   - `ConsumptionEntry(charge_ref: str, kind: Literal["reserve", "release"], amount: Amount, at: datetime)`
   - `consumed_in_period(entries: Iterable[ConsumptionEntry], mandate: OpenMandate, now: datetime) -> Amount`
+  - `RefState(status: Literal["unknown", "reserved", "released"], reserved: Amount | None)` (`reserved` es el total sin liberar cuando `status == "reserved"`, `None` en otro caso) y `ref_state(entries: Iterable[ConsumptionEntry], charge_ref: str) -> RefState` (R18; `ValueError` ante un ledger inconsistente, igual que `consumed_in_period`; ambos reciben solo el ledger de este mandato).
   - `Receipt(status: Literal["verified", "executed", "rejected"], verifier: str, reference: str, mandate_hash: str, at: datetime)`
   - Protocols `Signer.sign(payload: bytes) -> bytes`, `Verifier.verify(payload: bytes, signature: bytes) -> bool`; `HmacSha256Signer(key: bytes)` implementa ambos (`hmac.compare_digest`).
 
-- [ ] **Step 1: Tests de `check`** (mandato base: rango 100–500000 MXN, presupuesto diario 1000000, cuentas `{"acct-own"}`, pagadores `{"cust-juan"}`, rieles `{"codi_push","codi_link"}`, tz `America/Mexico_City`)
+- [x] **Step 1: Tests de `check`** (mandato base: rango 100–500000 MXN, presupuesto diario 1000000, cuentas `{"acct-own"}`, pagadores `{"cust-juan"}`, rieles `{"codi_push","codi_link"}`, tz `America/Mexico_City`)
   - `test_in_mandate_charge_is_ok`.
   - `test_foreign_receiving_account_is_violation` → `"account_not_allowed"`.
   - `test_unknown_payer_needs_approval` → `approval_reasons == ("payer_not_allowed",)`, `violations == ()`.
@@ -159,14 +160,14 @@ def test_money_add_requires_same_currency():
   - `test_budget_counts_requested_amount`: `consumed=990000` + 20000 → `"budget_exceeded"`.
   - `test_expired_revoked_and_mismatch`.
   - `test_outside_daily_window` (21:59 vs 22:01 local con ventana 07:00–22:00).
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa `models.py` y `check.py`; reúne todas las violaciones (no se detiene en la primera). **Step 4:** Run → PASS.
-- [ ] **Step 5: Tests de `consumed_in_period`**
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa `models.py` y `check.py`; reúne todas las violaciones (no se detiene en la primera). **Step 4:** Run → PASS.
+- [x] **Step 5: Tests de `consumed_in_period`**
   - `test_release_only_subtracts_matching_reserve`: reserve 30000 + release del mismo `charge_ref` → 0; release de un `charge_ref` sin reserve → `ValueError`.
   - `test_daily_period_uses_mandate_timezone`: reserve a las 23:30 del 1 dic local y `now` 00:30 del 2 dic local → 0. **(Review Focus 4)**
   - `test_total_period_ignores_time`.
-- [ ] **Step 6:** Run → FAIL; implementa (la semana inicia el lunes, el mes en el día 1, ambos en `tz`); Run → PASS.
-- [ ] **Step 7: Tests de firma**: `content_hash` estable entre instancias iguales y distinto si cambia `amount`; `HmacSha256Signer` verifica su firma y rechaza otra llave. Implementa; Run → PASS.
-- [ ] **Step 8:** Checks limpios. Commit `feat(mandates): add open/closed mandates, check and consumption`.
+- [x] **Step 6:** Run → FAIL; implementa (la semana inicia el lunes, el mes en el día 1, ambos en `tz`); Run → PASS.
+- [x] **Step 7: Tests de firma**: `content_hash` estable entre instancias iguales y distinto si cambia `amount`; `HmacSha256Signer` verifica su firma y rechaza otra llave. Implementa; Run → PASS.
+- [x] **Step 8:** Checks limpios. Commit `feat(mandates): add open/closed mandates, check and consumption`.
 - [ ] **Step 9: Entrega a la app.** Merge de las Tareas 1–3 a `main`; tag `v0.1.0a1`. Avisar al equipo de la app (ver "Entregas a la app").
 
 ### Task 4: `budgets`
