@@ -8,8 +8,10 @@ and circuit breakers against runaway agents. OpenAI's practical guide to buildin
 sets human intervention when failures pass a threshold; `consecutive_failures` is that trigger.
 
 ```
-pip install "agent-toolkit-budgets[langchain]"   # the extra adds the LangChain callback
+agent-toolkit-budgets[langchain] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/budgets
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

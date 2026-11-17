@@ -9,8 +9,10 @@ way: the owner authorizes the agent to *issue payment requests* (CoDi), and each
 their own banking app. Amounts are integers in minor units plus an ISO 4217 code, as in AP2.
 
 ```
-pip install agent-toolkit-mandates
+agent-toolkit-mandates @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/mandates
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

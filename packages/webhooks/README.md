@@ -8,8 +8,10 @@ transaction as the webhook id. Signature checking uses the `standardwebhooks` li
 the provider's Python example uses (design spec, section 7.7).
 
 ```
-pip install agent-toolkit-webhooks
+agent-toolkit-webhooks @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/webhooks
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

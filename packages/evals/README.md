@@ -8,8 +8,10 @@ deterministic graders, report pass^k (all k attempts pass) next to pass@k (at le
 build suites of 20 to 50 tasks from real failures, and read the transcripts.
 
 ```
-pip install "agent-toolkit-evals[pytest]"   # the extra adds the --eval-n option and fixture
+agent-toolkit-evals[pytest] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/evals
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

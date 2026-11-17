@@ -9,8 +9,10 @@ asks for non-repudiable evidence. Each event stores the previous event's hash, s
 removing or reordering one breaks the chain at that point.
 
 ```
-pip install "agent-toolkit-audit-log[postgres]"   # the extra adds the Postgres store
+agent-toolkit-audit-log[postgres] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/audit-log
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

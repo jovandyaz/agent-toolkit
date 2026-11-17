@@ -10,8 +10,10 @@ cases drawn from a prior collections project (see the design spec, section 7.6).
 integer in minor units plus an ISO 4217 code, never a float (AP2 v0.2 does the same).
 
 ```
-pip install agent-toolkit-payments-core
+agent-toolkit-payments-core @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/payments-core
 ```
+
+Not on PyPI: see the root README, "Install from a git tag".
 
 ## Example
 

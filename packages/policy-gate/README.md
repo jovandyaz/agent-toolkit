@@ -11,8 +11,10 @@ state change needs a verified mandate or a human; this gate reads a verified man
 reliable validation.
 
 ```
-pip install "agent-toolkit-policy-gate[langgraph]"   # pulls agent-toolkit-mandates and -budgets
+agent-toolkit-policy-gate[langgraph] @ git+https://github.com/jovandyaz/agent-toolkit@v0.1.0#subdirectory=packages/policy-gate
 ```
+
+Not on PyPI: see the root README, "Install from a git tag". With `uv`, `agent-toolkit-mandates` and `agent-toolkit-budgets` resolve from the same tag via the workspace sources; other installers must list them explicitly.
 
 ## Example
 
