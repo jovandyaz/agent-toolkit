@@ -148,14 +148,25 @@ so it is not run here:
 from agent_toolkit.policy_gate.adapters.langgraph import GatedToolNode
 
 node = GatedToolNode(tools, specs, context=build_context, on_decision=audit, replay=recorded_reply)
-builder.add_node("tools", node)
+
+
+def gated_tools(state: MessagesState, config: RunnableConfig) -> dict[str, list[ToolMessage]]:
+    # The mandate's critical section is one execution of the node: from context(state) until
+    # the tools have recorded their reserves. An interrupt raises out of the node and releases
+    # the lock; the re-run on resume takes it again. Use a lock per mandate (across processes,
+    # a database lock such as a Postgres advisory lock on the mandate id).
+    with mandate_lock(state):
+        return node(state, config)
+
+
+builder.add_node("tools", gated_tools)
 # Resume a paused turn from the trusted approval screen only, with JSON:
 graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="json")}), config)
 ```
 
 ## Contracts
 
-- `decide(call, tool, ctx) -> Decision` is pure. Rules, in order: tool name, strict argument
+- `decide(call, tool, ctx, *, thread_id=None) -> Decision` is pure. Rules, in order: tool name, strict argument
   validation (unknown keys denied), exceeded run budget, mandate check for `financial` tools,
   `high_risk`, Rule of Two. `Deny` beats `RequireApproval`. Reasons are stable strings such as
   `invalid_args:args.amount_minor:int_type`, `mandate:budget_exceeded`, `no_mandate`; the full
@@ -166,6 +177,16 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
 - `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` and `outside_window` follow
   `GateConfig.on_mandate_violation`; every other violation (foreign account, wrong agent or
   currency, expired or revoked mandate, ledger contradictions) is always denied.
+- The LangGraph adapter decides every call of a turn before running any, each against the ledger
+  plus a reserve for every earlier charge of the turn that may still run. A second change to one
+  charge within a turn is denied (`charge_ref_in_turn`, not configurable): a call on the
+  `charge_ref` of an earlier call of the turn that was not denied, or that already ran, never
+  runs, so multi-step changes to one charge (create then raise, raise twice) must span turns.
+- The adapter reports each decision with `on_decision(call, decision, approval)` before the call
+  would run: every `Deny` before any tool runs, then each `Allow` or approved `RequireApproval`
+  right before its tool runs. A rejected approval is a `Deny` whose reasons start with its
+  `approval_*` code, and carries the human's answer. When a tool or `on_decision` raises, the
+  calls after it in the turn are neither reported nor run (see "Re-runs").
 - The LangGraph adapter pauses with one `interrupt` per turn. Its value is plain JSON: a list with
   one `ApprovalRequest.model_dump(mode="json")` per call needing approval, with keys `call_id`,
   `tool`, `args`, `reasons`, `closed` (the charge as it will run, or null), `closed_mandate_hash`
@@ -192,8 +213,11 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
 ## Caller duties
 
 - Lock the mandate and keep a per-mandate ledger: pass `GateContext.ledger` with every entry of
-  that mandate and only those (`None` raises). Hold the lock from the decision, across the
-  interrupt, until the reserve is recorded.
+  that mandate and only those (`None` raises). With `decide`, hold the lock from reading the
+  ledger until the reserve of the allowed charge is recorded. With the adapter, the critical
+  section is one execution of the node, from `context(state)` until its tools have recorded their
+  reserves: wrap the node call in the lock (see the example above). An interrupt releases it, and
+  the re-run on resume judges every call against the ledger as it is then.
 - The `to_closed_mandate` builder must be deterministic and side-effect free (it runs more than
   once per call), and the application mints a new charge's `charge_ref` server-side from
   `ctx.thread_id` and `ctx.call_id` together (a call id alone can repeat in another thread),
@@ -212,8 +236,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   give the same charge after the call ran (never read state the call changes), or the re-run is
   denied `call_id_reused`. Without a hook, a reused call id reaches the tool with an old call's
   key: only a provider that rejects a reused key with another payload stops it.
-- Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per call
-  with its final decision, before the call runs, so an audit log that fails blocks the call.
+- Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per decided
+  call with its final decision, before the call runs, so an audit log that fails blocks the call.
+  A re-run without a replay hook reports every call again.
 - Resume only from the trusted approval screen through an authenticated channel, never from chat
   text. The `request_hash` is an integrity binding, not authentication.
 - The stock `ToolNode` with `handle_tool_errors` swallows `BudgetExceededError`; keep the budget

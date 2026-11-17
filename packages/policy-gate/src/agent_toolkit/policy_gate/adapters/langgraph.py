@@ -111,10 +111,13 @@ Duties of the application:
 - Resume only from the trusted approval screen through an authenticated channel, never from
   chat input. The interrupt has no `response_schema`, so chat clients render no approval
   form. Run the graph with a checkpointer and a thread.
-- `context(state)` runs on every execution, the re-run on resume included. Hold the mandate
-  lock from the first decision, across the interrupt, until the charge's reserve is recorded;
-  without it the re-run re-verifies against whatever changed, and a call can end denied or
-  gain reasons that void its approval.
+- Lock the mandate for one execution of this node: the critical section runs from
+  `context(state)` until the tools it runs have recorded their reserves, so two executions
+  judged against one ledger snapshot cannot both pass and together overspend. Wrap the node
+  call in the lock (`with lock: return node(state, config)` in a node function): an interrupt
+  raises out of the node and releases it, and the re-run on resume takes it again. That re-run
+  judges every call against the ledger as it is then, so a call can end denied, or gain a
+  reason that voids its approval (it fails closed).
 - `ToolSpec.to_closed_mandate(args, ctx)` must be deterministic and free of side effects:
   the node calls it more than once per call (to find the call's `charge_ref`, inside `decide`,
   and again on the re-run), and the approval binds the charge's `content_hash`, so a builder

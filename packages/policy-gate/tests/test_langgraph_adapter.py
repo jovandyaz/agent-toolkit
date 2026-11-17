@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import threading
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -1039,6 +1040,37 @@ def test_every_turn_needs_a_thread_id(proposed: LcToolCall) -> None:
     with pytest.raises(ValueError, match="thread_id"):
         rig.graph(durable=False).invoke(turn(proposed))
     assert (rig.total_runs(), rig.contexts_built, rig.reports) == (0, 0, [])
+
+
+def test_a_lock_around_the_node_covers_one_execution() -> None:
+    # The README recipe: the mandate's critical section is one execution of the node, from
+    # `context(state)` until the tools have run. An interrupt raises out of the node, which
+    # releases the lock; the re-run on resume takes it again.
+    rig = Rig()
+    lock = threading.Lock()
+    held: list[bool] = []
+
+    def locked_context(state: MessagesState) -> GateContext:
+        held.append(lock.locked())
+        return gate_context()
+
+    node = GatedToolNode(
+        tools=[rig.delete.as_tool()], specs={"delete_customer": DELETE}, context=locked_context
+    )
+
+    def gated_tools(state: MessagesState, config: RunnableConfig) -> dict[str, list[ToolMessage]]:
+        with lock:
+            return node(state, config)
+
+    graph = rig.graph(gated_tools)
+    (request,) = pending(graph.invoke(turn(call("delete_customer", "c1")), rig.thread))
+    assert not lock.locked()
+
+    graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+
+    assert not lock.locked()
+    assert held == [True, True]
+    assert rig.delete.runs == [{"customer_id": "cust-c1"}]
 
 
 # Idempotency keys and re-runs after a partial failure.
