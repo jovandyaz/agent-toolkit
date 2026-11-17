@@ -6,6 +6,11 @@ resolution-markers = [
     "python_full_version < '3.15'",
 ]
 
+[manifest]
+members = [
+    "agent-toolkit-payments-core",
+]
+
 [manifest.dependency-groups]
 dev = [
     { name = "import-linter", specifier = ">=2.16,<3" },
@@ -14,6 +19,17 @@ dev = [
     { name = "pytest", specifier = ">=9.2,<10" },
     { name = "ruff", specifier = ">=0.17,<0.18" },
 ]
+
+[[package]]
+name = "agent-toolkit-payments-core"
+version = "0.1.0a1"
+source = { editable = "packages/payments-core" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
 
 [[package]]
 name = "annotated-types"

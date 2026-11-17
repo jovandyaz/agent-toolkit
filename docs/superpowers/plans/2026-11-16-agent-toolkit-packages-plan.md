@@ -61,6 +61,8 @@ Fuente de los casos de aceptación: `cursor_hackathon_nov_2026` (pialy), `packag
 - Create: `src/agent_toolkit/payments_core/{__init__,money,intent,policies,ports,testing}.py` (sin `__init__.py` en `agent_toolkit/`)
 - Test: `packages/payments-core/tests/test_money.py`, `test_apply_payment.py`, `test_reconcile.py`, `test_retry.py`
 
+**Estado:** hecho (PR feat/payments-core). Decisiones R4–R9 en el ledger de SDD: `duplicate` separado de `already_applied`; tardío = después del vencimiento del intento pagado; el conector asigna `provider_ref` antes de enviar; mismo `provider_event_id` en webhook y consulta. Type-check por paquete con `scripts/typecheck.sh`.
+
 **Interfaces:**
 - Produces:
   - `Money(amount_minor: int, currency: str)`; `+`/`-` con misma moneda; `CurrencyMismatchError`; resultado negativo → `ValueError`.
@@ -76,7 +78,7 @@ Fuente de los casos de aceptación: `cursor_hackathon_nov_2026` (pialy), `packag
   - `RequestOutcome = Literal["not_sent", "rejected", "ambiguous"]`; `may_retry_request(outcome: RequestOutcome) -> bool`
   - Protocols `RailConnector` (`request(intent, rail, expires_at) -> Attempt`, `query(provider_ref) -> ProviderStatus`), `IntentRepository` (`get`, `get_by_provider_ref`, `save`), `UnitOfWork` (context manager, `commit`, `rollback`); `testing.InMemoryIntentRepository`, `testing.FakeRailConnector`.
 
-- [ ] **Step 1: Tests de `Money`**
+- [x] **Step 1: Tests de `Money`**
 ```python
 def test_money_rejects_float_and_bad_currency():
     with pytest.raises(ValidationError): Money(amount_minor=1.5, currency="MXN")
@@ -85,9 +87,9 @@ def test_money_add_requires_same_currency():
     assert Money(amount_minor=100, currency="MXN") + Money(amount_minor=1, currency="MXN") == Money(amount_minor=101, currency="MXN")
     with pytest.raises(CurrencyMismatchError): Money(amount_minor=1, currency="MXN") + Money(amount_minor=1, currency="USD")
 ```
-- [ ] **Step 2:** `uv run pytest packages/payments-core -k money` → FAIL (import error).
-- [ ] **Step 3:** Implementa `money.py`.
-- [ ] **Step 4: Tests de `apply_provider_payment`** (uno por caso; `intent` con monto 35000 MXN, `expires_at` = T+10 min)
+- [x] **Step 2:** `uv run pytest packages/payments-core -k money` → FAIL (import error).
+- [x] **Step 3:** Implementa `money.py`.
+- [x] **Step 4: Tests de `apply_provider_payment`** (uno por caso; `intent` con monto 35000 MXN, `expires_at` = T+10 min)
   - `test_payment_within_validity_confirms`: kind `confirmed`, status `paid`, `late is False`.
   - `test_late_payment_confirms_and_flags_late`: `received_at` > `expires_at` del último attempt → `confirmed_late`, `late is True`.
   - `test_replayed_event_is_already_applied`: mismo `provider_event_id` dos veces → segunda `already_applied`, `paid_total` sin cambio. **(Review Focus 3)**
@@ -96,13 +98,13 @@ def test_money_add_requires_same_currency():
   - `test_partial_then_complete`: 20000 → `partial`/`partially_paid`; luego 15000 → `confirmed`/`paid`.
   - `test_overpayment_flags_excess`: 40000 → `confirmed` + `RefundFlag(reason="excess", amount=5000)`.
   - `test_currency_mismatch_raises`.
-- [ ] **Step 5:** Run → FAIL. **Step 6:** Implementa `intent.py` + `apply_provider_payment` en `policies.py` (función pura; devuelve un intent nuevo con `model_copy`). **Step 7:** Run → PASS.
-- [ ] **Step 8: Tests de `reconcile_attempt` y `may_retry_request`**
+- [x] **Step 5:** Run → FAIL. **Step 6:** Implementa `intent.py` + `apply_provider_payment` en `policies.py` (función pura; devuelve un intent nuevo con `model_copy`). **Step 7:** Run → PASS.
+- [x] **Step 8: Tests de `reconcile_attempt` y `may_retry_request`**
   - `paid` no aplicado → mismo resultado que `apply_provider_payment`; `pending` → intent sin cambios; `expired_unpaid` → attempt `expired` y, si ninguno sigue vivo y no hay pago, intent `expired`; `not_found` sobre attempt `ambiguous` → attempt `expired` (nunca llegó).
   - `may_retry_request("not_sent") is True`; `"rejected"` y `"ambiguous"` → `False`.
-- [ ] **Step 9:** Run → FAIL; implementa; Run → PASS.
-- [ ] **Step 10:** Port de los casos de pialy restantes que no cubran los tests de arriba (cada uno con comentario del test de origen). Run → PASS.
-- [ ] **Step 11:** `ruff`, `mypy`, `lint-imports` limpios. Commit `feat(payments-core): add money, intents and payment policies`.
+- [x] **Step 9:** Run → FAIL; implementa; Run → PASS.
+- [x] **Step 10:** Port de los casos de pialy restantes que no cubran los tests de arriba (cada uno con comentario del test de origen). Run → PASS.
+- [x] **Step 11:** `ruff`, `mypy`, `lint-imports` limpios. Commit `feat(payments-core): add money, intents and payment policies`.
 
 ### Task 2: `webhooks`
 

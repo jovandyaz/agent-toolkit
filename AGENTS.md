@@ -28,7 +28,9 @@ Hackatón México (separate private repo). Second planned consumer: CDMX permit 
 ## Commands
 - `uv sync --all-packages`
 - `uv run pytest` (Postgres tests need `DATABASE_URL`; marker `postgres`)
-- `uv run ruff check . && uv run ruff format --check . && uv run mypy packages tests && uv run lint-imports`
+- `uv run ruff check . && uv run ruff format --check . && uv run scripts/typecheck.sh && uv run lint-imports`
+  (`scripts/typecheck.sh` runs mypy once per package plus the root `tests/`, since test basenames repeat
+  across packages)
 
 ## Git
 Conventional Commits, single line, English, no trailers. Branch per package, PR per package; never

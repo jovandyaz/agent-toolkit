@@ -1,0 +1,14 @@
+[project]
+name = "agent-toolkit-payments-core"
+version = "0.1.0a1"
+description = "Request-to-pay payment domain without I/O: money, intents, attempts and payment policies."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.payments_core"

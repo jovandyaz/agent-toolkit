@@ -19,6 +19,10 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+# Package sources live in packages/*/src, where ruff cannot detect them as first party.
+known-first-party = ["agent_toolkit"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -33,7 +37,7 @@ markers = ["postgres: needs DATABASE_URL pointing to a disposable Postgres"]
 # Cores must stay framework-free. Adapters (agent_toolkit.<pkg>.adapters.*) are the only exception.
 # Each package adds its namespace portion to root_packages when it lands.
 [tool.importlinter]
-root_packages = []
+root_packages = ["agent_toolkit.payments_core"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
