@@ -74,6 +74,9 @@ Then it:
    `mandate:charge_ref_reused` or `mandate:previous_amount_mismatch`, which also describe a
    charge that already ran (see "Re-runs"): it gets `ToolMessage(status="error",
    content="Check the charge's status before retrying, it may already exist: <reasons>")`.
+   A call denied `call_id_reused` may also have run (step 0) and gets
+   `ToolMessage(status="error", content="Check this call's result before retrying, it may
+   already have run: call_id_reused")`.
 5. Calls `on_decision(call, decision, approval)` once per decided call with its final
    decision, always before the call would run: first a `Deny` for every call that does not
    run, before any tool runs; then, right before each call runs, `Allow`, or `RequireApproval`
@@ -314,8 +317,8 @@ class ApprovalDecision(BaseModel):
 _ANSWERS = TypeAdapter(dict[str, ApprovalDecision])
 _SAME_CHARGE_IN_TURN = Deny(reasons=("charge_ref_in_turn",))
 _CALL_ID_REUSED = Deny(reasons=("call_id_reused",))
-# Denials that a re-run also gives a charge that already ran: the refusal must not claim that
-# the charge was never executed.
+# Denials that a re-run also gives a call that already ran: the refusal must not claim that it
+# was never executed. A charge's own denials name the charge; `call_id_reused` may be any tool's.
 _MAY_HAVE_RUN = frozenset({"mandate:charge_ref_reused", "mandate:previous_amount_mismatch"})
 
 
@@ -691,6 +694,8 @@ def _refusal(call: ToolCall, deny: Deny) -> ToolMessage:
     reasons = ", ".join(deny.reasons)
     if _MAY_HAVE_RUN.intersection(deny.reasons):
         content = f"Check the charge's status before retrying, it may already exist: {reasons}"
+    elif deny == _CALL_ID_REUSED:
+        content = f"Check this call's result before retrying, it may already have run: {reasons}"
     else:
         content = f"Not executed: {reasons}"
     return ToolMessage(

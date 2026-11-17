@@ -1393,6 +1393,11 @@ def test_a_turn_without_a_message_id_raises() -> None:
     assert (rig.total_runs(), rig.contexts_built, rig.reports) == (0, 0, [])
 
 
+CALL_ID_REUSED_REPLY = (
+    "Check this call's result before retrying, it may already have run: call_id_reused"
+)
+
+
 def test_a_record_with_another_fingerprint_is_denied() -> None:
     # Under the call's own key, but for another request: the hook answered for another call.
     rig = Rig()
@@ -1402,7 +1407,7 @@ def test_a_record_with_another_fingerprint_is_denied() -> None:
 
     assert rig.lookup.runs == []
     reply = replies(result)["c1"]
-    assert (reply.status, reply.content) == ("error", "Not executed: call_id_reused")
+    assert (reply.status, reply.content) == ("error", CALL_ID_REUSED_REPLY)
     assert [(c.id, d) for c, d, _ in rig.reports] == [("c1", Deny(reasons=("call_id_reused",)))]
 
 
@@ -1426,9 +1431,11 @@ def test_a_re_run_whose_builder_drifted_is_denied_not_replayed() -> None:
 
     again = graph.invoke(None, rig.thread)
 
+    # The call ran, so the reply must not claim it did not.
     assert len(rig.charge.runs) == 1
-    assert replies(again)["c1"].status == "error"
-    assert "call_id_reused" in str(replies(again)["c1"].content)
+    reply = replies(again)["c1"]
+    assert (reply.status, reply.content) == ("error", CALL_ID_REUSED_REPLY)
+    assert "Not executed" not in str(reply.content)
 
 
 # Unknown tools, bad input and configuration.

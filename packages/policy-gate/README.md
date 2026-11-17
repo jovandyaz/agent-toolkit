@@ -213,8 +213,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   content)` the application stored under that key when the call ran, or None. A call whose stored
   fingerprint matches gets the stored reply and is neither decided, reported nor run again; a call
   whose key matches with another fingerprint is denied (`call_id_reused`): the hook answered for
-  another call, or the call's builder now gives another charge than when it ran. The node never
-  runs a call the hook answers.
+  another call, or the call's builder now gives another charge than when it ran. That call may
+  have run, so its reply tells the model to check the call's result before retrying. The node
+  never runs a call the hook answers.
 
 ## Caller duties
 
