@@ -1,0 +1,20 @@
+[project]
+name = "agent-toolkit-evals"
+version = "0.1.0a1"
+description = "Minimal eval runner for agents: deterministic final-state graders, k isolated attempts, pass@k and pass^k."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[project.optional-dependencies]
+pytest = ["pytest>=9.2,<10"]
+
+[project.entry-points.pytest11]
+agent_toolkit_evals = "agent_toolkit.evals.pytest_plugin"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.evals"

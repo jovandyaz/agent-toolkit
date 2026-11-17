@@ -303,10 +303,10 @@ Herramienta base [decisión del plan, dentro del criterio de 7.5]: runner propio
   - `TaskResult(task_id, n, c, pass_at: dict[int, float], pass_hat: dict[int, float], failures: tuple[Grade, ...])`; `SuiteReport(results: tuple[TaskResult, ...])` con `summary() -> str` y `to_json() -> str`.
   - Plugin pytest `--eval-n` (por defecto 5) para correr suites como tests.
 
-- [ ] **Step 1: Tests de métricas**: `pass_at_k(5, 5, 3) == 1.0`; `pass_hat_k(5, 4, 5) == 0.0`; `pass_hat_k(5, 4, 1) == 0.8`; `pass_at_k(5, 0, 1) == 0.0`; `k > n` → `ValueError`.
-- [ ] **Step 2: Tests del runner**: tarea que pasa en intentos pares → `c` correcto; una excepción dentro de `attempt` cuenta como fallo con su razón, no aborta la suite; transcripciones JSONL escritas por intento cuando se da `transcripts_dir`.
-- [ ] **Step 3:** Run → FAIL. **Step 4:** Implementa. **Step 5:** Run → PASS.
-- [ ] **Step 6:** Checks limpios. Commit `feat(evals): add pass@k and pass^k runner`.
+- [x] **Step 1: Tests de métricas**: `pass_at_k(5, 5, 3) == 1.0`; `pass_hat_k(5, 4, 5) == 0.0`; `pass_hat_k(5, 4, 1) == 0.8`; `pass_at_k(5, 0, 1) == 0.0`; `k > n` → `ValueError`.
+- [x] **Step 2: Tests del runner**: tarea que pasa en intentos pares → `c` correcto; una excepción dentro de `attempt` cuenta como fallo con su razón, no aborta la suite; transcripciones JSONL escritas por intento cuando se da `transcripts_dir`.
+- [x] **Step 3:** Run → FAIL. **Step 4:** Implementa. **Step 5:** Run → PASS.
+- [x] **Step 6:** Checks limpios. Commit `feat(evals): add pass@k and pass^k runner`.
 
 ### Task 9: Congelar v0.1.0
 
