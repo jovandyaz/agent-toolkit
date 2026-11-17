@@ -248,15 +248,15 @@ def test_money_add_requires_same_currency():
   4. Ejecuta las `Allow` y las aprobadas; `Deny` y las rechazadas producen `ToolMessage(status="error", content=<razón accionable>)`.
   5. `on_decision` se llama una vez por llamada con su resultado final (la app lo conecta a `audit-log`).
 
-- [ ] **Step 1: Tests** (grafo mínimo `StateGraph` + `InMemorySaver`, herramientas fake que cuentan invocaciones):
+- [x] **Step 1: Tests** (grafo mínimo `StateGraph` + `InMemorySaver`, herramientas fake que cuentan invocaciones):
   - `test_allowed_call_executes`.
   - `test_denied_call_returns_error_message_and_does_not_execute`.
   - `test_approval_interrupts_then_executes_on_approved_resume` (`Command(resume={call_id: decision})`).
   - `test_resume_executes_each_tool_once`: una llamada `Allow` + una `RequireApproval` en el mismo turno; tras reanudar aprobada, cada contador == 1. **(Review Focus 1)**
   - `test_resume_with_mismatched_hash_rejects`. **(Review Focus 2)**
   - `test_on_decision_called_once_per_call`.
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa siguiendo la doc vigente de `interrupt`/`Command` (en langgraph 1.2, `interrupt(value, *, response_schema=…)` puede validar la reanudación). **Step 4:** Run → PASS.
-- [ ] **Step 5:** Checks limpios. Commit `feat(policy-gate): add langgraph gated tool node with interrupt approvals`.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa siguiendo la doc vigente de `interrupt`/`Command` (en langgraph 1.2, `interrupt(value, *, response_schema=…)` puede validar la reanudación). **Step 4:** Run → PASS.
+- [x] **Step 5:** Checks limpios. Commit `feat(policy-gate): add langgraph gated tool node with interrupt approvals`.
 
 ### Task 7: `audit-log`
 
