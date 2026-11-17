@@ -13,7 +13,7 @@ from pydantic import (
 )
 
 from agent_toolkit.budgets import BudgetLimits, BudgetState
-from agent_toolkit.mandates import Amount, ClosedMandate, OpenMandate, RefState
+from agent_toolkit.mandates import ClosedMandate, ConsumptionEntry, OpenMandate
 
 Identifier = Annotated[str, Field(min_length=1)]
 Risk = Literal["low", "medium", "high"]
@@ -103,16 +103,15 @@ class GateConfig(BaseModel):
 class GateContext(BaseModel):
     """Everything besides the call that `decide` needs, all from trusted application state.
 
-    `consumed` and `ref_state` come from the mandate's ledger (see `decide`); a financial call
-    under a mandate needs both.
+    `ledger` holds every entry of this mandate's consumption ledger and nothing else (see
+    `decide`); a financial call under a mandate needs it, even when it is empty.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     session: SessionProfile
     mandate: OpenMandate | None
-    consumed: Amount | None
-    ref_state: RefState | None
+    ledger: tuple[ConsumptionEntry, ...] | None
     budget_state: BudgetState
     budget_limits: BudgetLimits
     now: AwareDatetime

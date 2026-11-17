@@ -14,9 +14,9 @@ from agent_toolkit.mandates import (
     AmountRange,
     Budget,
     ClosedMandate,
+    ConsumptionEntry,
     DailyWindow,
     OpenMandate,
-    RefState,
 )
 from agent_toolkit.policy_gate import (
     Allow,
@@ -33,11 +33,23 @@ from agent_toolkit.policy_gate import (
 
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
 NOW = datetime(2026, 12, 1, 12, 0, tzinfo=MEXICO_CITY)
-UNKNOWN = RefState(status="unknown", reserved=None)
+MINTED_REF = "ch_new"  # The ref the application mints server-side for a new charge.
 
 
 def mxn(minor: int) -> Amount:
     return Amount(minor=minor, currency="MXN")
+
+
+def reserve(ref: str, amount: Amount) -> ConsumptionEntry:
+    return ConsumptionEntry(
+        charge_ref=ref, kind="reserve", amount=amount, at=NOW - timedelta(hours=2)
+    )
+
+
+def release(ref: str, amount: Amount) -> ConsumptionEntry:
+    return ConsumptionEntry(
+        charge_ref=ref, kind="release", amount=amount, at=NOW - timedelta(hours=1)
+    )
 
 
 class ChargeArgs(BaseModel):
@@ -52,6 +64,7 @@ class ChargeArgs(BaseModel):
     currency: str
     reference: str
     previous_amount_minor: int | None = None
+    link_ref: str | None = None  # The pending link an increase raises.
 
 
 class LeakyChargeArgs(ChargeArgs):
@@ -92,14 +105,19 @@ class AllowingArgs(BaseModel):
 
 
 def build_charge(args: BaseModel) -> ClosedMandate:
-    """The application's builder: it binds the mandate, agent and charge ref, not the model."""
+    """The application's builder: it binds the mandate and agent, and mints a new charge's ref.
+
+    An increase names the link it raises; the gate reads that ref's reserve from the ledger.
+    """
     assert isinstance(args, ChargeArgs)
     previous = args.previous_amount_minor
+    if (previous is None) != (args.link_ref is None):
+        raise ValueError("an increase names its link and its previous amount; a new charge neither")
     return ClosedMandate(
         open_mandate_id="om_1",
         agent_id="agent_1",
         kind="new_charge" if previous is None else "amount_increase",
-        charge_ref="ch_1",
+        charge_ref=args.link_ref or MINTED_REF,
         payer=args.payer,
         receiving_account=args.receiving_account,
         rail=args.rail,
@@ -231,8 +249,7 @@ def context(**overrides: object) -> GateContext:
     fields: dict[str, object] = {
         "session": session(),
         "mandate": mandate(),
-        "consumed": mxn(0),
-        "ref_state": UNKNOWN,
+        "ledger": (),
         "budget_state": BudgetState.empty(),
         "budget_limits": BudgetLimits(),
         "now": NOW,
@@ -242,7 +259,7 @@ def context(**overrides: object) -> GateContext:
 
 
 def without_mandate(**overrides: object) -> GateContext:
-    return context(mandate=None, consumed=None, ref_state=None, **overrides)
+    return context(mandate=None, ledger=None, **overrides)
 
 
 def config(on_mandate_violation: str) -> GateConfig:
@@ -269,7 +286,7 @@ def test_allow_returns_parsed_args_and_closed_mandate() -> None:
         open_mandate_id="om_1",
         agent_id="agent_1",
         kind="new_charge",
-        charge_ref="ch_1",
+        charge_ref=MINTED_REF,
         payer="cust-juan",
         receiving_account="acct-own",
         rail="codi_push",
@@ -280,17 +297,38 @@ def test_allow_returns_parsed_args_and_closed_mandate() -> None:
 
 
 def test_increase_inside_its_mandate_is_allowed() -> None:
-    ledger = RefState(status="reserved", reserved=mxn(30000))
-
     decision = decide(
-        charge_call(previous_amount_minor=30000),
+        charge_call(link_ref="ch_1", previous_amount_minor=30000),
         CHARGE,
-        context(consumed=mxn(30000), ref_state=ledger),
+        context(ledger=(reserve("ch_1", mxn(30000)),)),
     )
 
     assert isinstance(decision, Allow)
     assert decision.closed is not None
     assert decision.closed.kind == "amount_increase"
+
+
+def test_increase_is_judged_against_the_reserve_of_its_own_ref() -> None:
+    # The ledger holds two links; the call raises ch_1, whose reserve is 30000.
+    ledger = context(ledger=(reserve("ch_2", mxn(40000)), reserve("ch_1", mxn(30000))))
+
+    own = decide(
+        charge_call(amount_minor=45000, link_ref="ch_1", previous_amount_minor=30000),
+        CHARGE,
+        ledger,
+    )
+    other = decide(
+        charge_call(amount_minor=45000, link_ref="ch_1", previous_amount_minor=40000),
+        CHARGE,
+        ledger,
+    )
+    fresh = decide(charge_call(), CHARGE, ledger)
+
+    assert isinstance(own, Allow)
+    assert own.closed is not None
+    assert own.closed.charge_ref == "ch_1"
+    assert other == Deny(reasons=("mandate:previous_amount_mismatch",))
+    assert isinstance(fresh, Allow)
 
 
 # Rule 1: the call must be for this tool.
@@ -431,17 +469,20 @@ ALWAYS_DENIED = [
     pytest.param({}, {"mandate": mandate(expires_at=NOW)}, "expired", id="expired"),
     pytest.param({}, {"mandate": mandate(revoked_at=NOW)}, "revoked", id="revoked"),
     pytest.param(
-        {"previous_amount_minor": 30000}, {}, "previous_amount_mismatch", id="previous_amount"
+        {"link_ref": "ch_1", "previous_amount_minor": 30000},
+        {},
+        "previous_amount_mismatch",
+        id="previous_amount",
     ),
     pytest.param(
         {},
-        {"ref_state": RefState(status="reserved", reserved=mxn(100))},
+        {"ledger": (reserve(MINTED_REF, mxn(100)),)},
         "charge_ref_reused",
         id="ref_reserved",
     ),
     pytest.param(
         {},
-        {"ref_state": RefState(status="released", reserved=None)},
+        {"ledger": (reserve(MINTED_REF, mxn(100)), release(MINTED_REF, mxn(100)))},
         "charge_ref_reused",
         id="ref_released",
     ),
@@ -475,7 +516,7 @@ def test_violation_follows_config() -> None:
 CONFIGURABLE = [
     pytest.param({"rail": "spei"}, {}, "rail_not_allowed", id="rail"),
     pytest.param({"amount_minor": 600000}, {}, "amount_out_of_range", id="range"),
-    pytest.param({}, {"consumed": mxn(990000)}, "budget_exceeded", id="budget"),
+    pytest.param({}, {"ledger": (reserve("ch_0", mxn(990000)),)}, "budget_exceeded", id="budget"),
     pytest.param(
         {},
         {"mandate": mandate(daily_window=DailyWindow(start=time(7), end=time(11)))},
@@ -536,20 +577,52 @@ def test_deny_lists_every_denying_violation() -> None:
     assert lenient == Deny(reasons=("mandate:account_not_allowed",))
 
 
-@pytest.mark.parametrize("missing", ["consumed", "ref_state"])
-def test_financial_call_under_mandate_needs_both_ledger_inputs(missing: str) -> None:
-    # Treating a missing ledger value as zero would overspend: it is a programming error.
-    with pytest.raises(ValueError, match=missing):
-        decide(charge_call(), CHARGE, context(**{missing: None}))
+def test_financial_call_under_mandate_needs_its_ledger() -> None:
+    # Treating a missing ledger as empty would overspend: it is a programming error.
+    with pytest.raises(ValueError, match="needs the mandate's ledger"):
+        decide(charge_call(), CHARGE, context(ledger=None))
 
 
-def test_ledger_inputs_are_needed_only_for_financial_calls_under_a_mandate() -> None:
-    no_ledger = context(consumed=None, ref_state=None)
+def test_ledger_is_needed_only_for_financial_calls_under_a_mandate() -> None:
+    no_ledger = context(ledger=None)
 
     assert decide(customer_call("lookup_customer"), LOOKUP, no_ledger) == Allow(
         args=customer_args(), closed=None
     )
     assert isinstance(decide(charge_call(), CHARGE, without_mandate()), RequireApproval)
+
+
+INCONSISTENT_LEDGERS = [
+    pytest.param((release("ch_0", mxn(100)),), id="release_without_reserve"),
+    pytest.param(
+        (reserve("ch_0", mxn(100)), release("ch_0", mxn(100)), release("ch_0", mxn(100))),
+        id="released_twice",
+    ),
+    pytest.param((reserve("ch_0", mxn(100)), release("ch_0", mxn(60))), id="partial_release"),
+    pytest.param((reserve("ch_0", Amount(minor=100, currency="USD")),), id="other_currency"),
+]
+
+
+@pytest.mark.parametrize("on_violation", ["deny", "require_approval"])
+@pytest.mark.parametrize("ledger", INCONSISTENT_LEDGERS)
+def test_inconsistent_ledger_is_denied(
+    ledger: tuple[ConsumptionEntry, ...], on_violation: str
+) -> None:
+    decision = decide(charge_call(), CHARGE, context(ledger=ledger, config=config(on_violation)))
+
+    assert decision == Deny(reasons=("ledger_inconsistent",))
+
+
+@pytest.mark.parametrize("on_violation", ["deny", "require_approval"])
+def test_mandate_of_another_principal_is_denied(on_violation: str) -> None:
+    ctx = context(session=session(principal_id="owner_2"), config=config(on_violation))
+
+    in_mandate = decide(charge_call(), CHARGE, ctx)
+    # Judged before mandates.check, so the foreign account is not what decides.
+    foreign_account = decide(charge_call(receiving_account="acct-other"), CHARGE, ctx)
+
+    assert in_mandate == Deny(reasons=("principal_mismatch",))
+    assert foreign_account == Deny(reasons=("principal_mismatch",))
 
 
 def test_tool_args_cannot_change_the_acting_agent() -> None:

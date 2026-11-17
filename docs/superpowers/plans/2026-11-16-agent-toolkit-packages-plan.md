@@ -200,7 +200,7 @@ def test_money_add_requires_same_currency():
 - Test: `packages/policy-gate/tests/test_decide.py`, `test_models.py`
 
 **Interfaces:**
-- Consumes: `mandates.check`, `ClosedMandate`, `OpenMandate`, `Amount`, `RefState`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
+- Consumes: `mandates.check`, `consumed_in_period`, `ref_state`, `ClosedMandate`, `OpenMandate`, `ConsumptionEntry`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
 - Produces:
   - `Risk = Literal["low", "medium", "high"]`; `Effects(reads_sensitive: bool, changes_state: bool, external_comm: bool)`
   - `ToolSpec(name, risk, effects, reversible: bool, financial: bool, args_model: type[BaseModel], to_closed_mandate: Callable[[BaseModel], ClosedMandate] | None)`; validación: `financial=True` exige `to_closed_mandate`, y solo una herramienta financiera lo acepta (en otra nunca correría). `decide` valida los args en modo estricto y rechaza claves desconocidas a toda profundidad aunque `args_model` no lo haga.
@@ -208,13 +208,13 @@ def test_money_add_requires_same_currency():
   - `ToolCall(id: str, name: str, args: Mapping[str, object])`
   - `GateConfig(on_mandate_violation: Literal["deny", "require_approval"] = "require_approval")`
   - `Allow(kind="allow", args: BaseModel, closed: ClosedMandate | None)`, `RequireApproval(kind="require_approval", reasons: tuple[str, ...], args, closed)`, `Deny(kind="deny", reasons: tuple[str, ...])`; `Decision = Allow | RequireApproval | Deny` (unión discriminada por `kind`).
-  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, consumed: Amount | None, ref_state: RefState | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime (aware), config: GateConfig)` (R21: herramienta financiera con mandato exige `consumed` y `ref_state`, ambos del ledger de ese mandato; si falta alguno, `decide` lanza `ValueError` antes de toda regla. El llamador bloquea el mandato desde calcularlos hasta registrar la reserva, y un `ValueError` del ledger es deny, nunca allow).
+  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, ledger: tuple[ConsumptionEntry, ...] | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime (aware), config: GateConfig)` (R22: `ledger` es el ledger completo de este mandato y nada más; `decide` calcula `consumed_in_period(ledger, mandate, now)` y `ref_state(ledger, closed.charge_ref)` tras construir el cierre, así la ref siempre es la de la llamada. Herramienta financiera con mandato y `ledger is None` → `ValueError` antes de toda regla (R2). El llamador bloquea el mandato desde leer el ledger hasta registrar la reserva).
   - `decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision`
 - Reglas, en orden (la primera que aplica decide `Deny`; las de aprobación se acumulan):
   1. `call.name != tool.name` → `Deny("tool_mismatch")`.
   2. Args inválidos según `args_model` → `Deny("invalid_args:<loc>:<type>")`, una razón por error (`loc` = `args.<ruta>`, o `closed.<ruta>` si falla el cierre del mandato; sin mensajes, que pueden traer PII).
   3. `budgets.check` no vacío → `Deny("budget_exceeded:<kind>")`.
-  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `closed = tool.to_closed_mandate(args)`; un `ValueError`/`ValidationError` → `Deny("invalid_args:closed…")`; `closed.agent_id != session.agent_id` → `Deny("agent_mismatch")` antes de `check`. Violaciones `account_not_allowed`, `mandate_mismatch`, `agent_mismatch`, `currency_mismatch`, `expired`, `revoked`, `previous_amount_mismatch` o `charge_ref_reused` (y cualquiera nueva) → `Deny("mandate:<v>")` siempre (no configurable). `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` y `outside_window` → según `config`. `approval_reasons` → `RequireApproval("mandate:<r>")`.
+  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `closed = tool.to_closed_mandate(args)`; un `ValueError`/`ValidationError` → `Deny("invalid_args:closed…")`; `closed.agent_id != session.agent_id` → `Deny("agent_mismatch")`; `mandate.principal_id != session.principal_id` → `Deny("principal_mismatch")` (R23); un `ValueError` del ledger → `Deny("ledger_inconsistent")` (R22); los tres antes de `check` y no configurables. Violaciones `account_not_allowed`, `mandate_mismatch`, `agent_mismatch`, `currency_mismatch`, `expired`, `revoked`, `previous_amount_mismatch` o `charge_ref_reused` (y cualquiera nueva) → `Deny("mandate:<v>")` siempre (no configurable). `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` y `outside_window` → según `config`. `approval_reasons` → `RequireApproval("mandate:<r>")`.
   5. No financiero con `risk="high"` → `RequireApproval("high_risk")`.
   6. Sesión con las tres banderas Rule of Two y `effects.changes_state`, salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
   7. Si no → `Allow`.

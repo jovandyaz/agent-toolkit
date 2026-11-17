@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ValidationError
 
 from agent_toolkit import budgets, mandates
-from agent_toolkit.mandates import Amount, ClosedMandate, OpenMandate, RefState, Violation
+from agent_toolkit.mandates import ClosedMandate, ConsumptionEntry, OpenMandate, Violation
 from agent_toolkit.policy_gate.models import (
     Allow,
     Decision,
@@ -29,8 +29,7 @@ _OVERRIDABLE: frozenset[Violation] = frozenset(
 @dataclass(frozen=True)
 class _MandateInputs:
     mandate: OpenMandate
-    consumed: Amount
-    ref_state: RefState
+    ledger: tuple[ConsumptionEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -52,11 +51,14 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
     3. An exceeded run budget: deny `budget_exceeded:<kind>`.
     4. A financial tool without a mandate needs approval (`no_mandate`). With one, it builds
        the charge with `tool.to_closed_mandate`; a `ValueError` (pydantic's `ValidationError`
-       included) denies `invalid_args:closed…`, and a charge for another agent than
-       `ctx.session.agent_id` denies `agent_mismatch`. Then `mandates.check` judges it:
-       violations outside `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` and
-       `outside_window` are always denied; those four follow `ctx.config`. Its approval
-       reasons need approval.
+       included) denies `invalid_args:closed…`. A charge for another agent than
+       `ctx.session.agent_id` denies `agent_mismatch`, and a mandate of another principal than
+       `ctx.session.principal_id` denies `principal_mismatch`. From `ctx.ledger` it computes
+       the budget consumed this period and the state of the charge's own `charge_ref`; a
+       ledger that does not add up denies `ledger_inconsistent`. Then `mandates.check` judges
+       the charge: violations outside `rail_not_allowed`, `amount_out_of_range`,
+       `budget_exceeded` and `outside_window` are always denied; those four follow
+       `ctx.config`. Its approval reasons need approval.
     5. A non-financial `high` risk tool needs approval (`high_risk`).
     6. A session holding all three Rule of Two flags needs approval for a tool that changes
        state (`rule_of_two`), unless it is a financial call its mandate fully verified.
@@ -71,25 +73,26 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
       (`closed`, `closed.minor`). Error messages are left out: they may echo PII.
     - `budget_exceeded:<kind>`: one per exceeded run limit (`budgets.ExceededKind`).
     - `agent_mismatch`: the charge names another agent than the session's.
+    - `principal_mismatch`: the mandate belongs to another principal than the session's.
+    - `ledger_inconsistent`: `mandates.consumed_in_period` or `mandates.ref_state` rejected
+      `ctx.ledger`.
     - `mandate:<violation>` and `mandate:<approval reason>`: what `mandates.check` reported,
       with its own names (`mandate:amount_out_of_range`, `mandate:open_amount`).
     - `no_mandate`, `high_risk`, `rule_of_two`: reasons a human must approve.
 
     Caller duties for a financial call under a mandate:
 
-    - Compute `ctx.consumed` (`mandates.consumed_in_period`) and `ctx.ref_state`
-      (`mandates.ref_state` for the charge's `charge_ref`) from this mandate's ledger only,
-      never from tool arguments.
-    - Hold a lock on the mandate from computing them until the reserve of an allowed or
+    - Supply in `ctx.ledger` every entry of this mandate's ledger and only those: another
+      mandate's entries would spend its budget here or hide a reused ref.
+    - Hold a lock on the mandate from reading the ledger until the reserve of an allowed or
       approved charge is recorded after execution: two calls judged against one snapshot can
       both pass and together overspend.
-    - Treat a `ValueError` raised while computing them (an inconsistent ledger) as a deny,
-      never as an allow.
-    - Execute exactly the returned `closed`, not a charge rebuilt from the arguments.
+    - Execute exactly the returned `closed`, not a charge rebuilt from the arguments, and
+      reserve `mandates.reserve_amount(closed)` under `closed.charge_ref`.
 
     Raises ValueError, before any rule, when a financial tool runs under a mandate and
-    `ctx.consumed` or `ctx.ref_state` is missing: treating it as empty would overspend.
-    Exceptions other than `ValueError` from the tool's models or builder propagate.
+    `ctx.ledger` is None: treating it as empty would overspend. Exceptions other than
+    `ValueError` from the tool's models or builder propagate.
     """
     inputs = _mandate_inputs(tool, ctx)
     if call.name != tool.name:
@@ -119,17 +122,15 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
 
 
 def _mandate_inputs(tool: ToolSpec, ctx: GateContext) -> _MandateInputs | None:
-    """The mandate and its ledger values a financial call needs; None without a mandate."""
+    """The mandate and its ledger a financial call needs; None without a mandate."""
     if not tool.financial or ctx.mandate is None:
         return None
-    if ctx.consumed is None or ctx.ref_state is None:
-        ledger = {"consumed": ctx.consumed, "ref_state": ctx.ref_state}
-        missing = " and ".join(name for name, value in ledger.items() if value is None)
+    if ctx.ledger is None:
         raise ValueError(
-            f"financial tool {tool.name!r} under mandate {ctx.mandate.id!r} needs {missing} "
-            "from the mandate's ledger"
+            f"financial tool {tool.name!r} under mandate {ctx.mandate.id!r} needs the "
+            "mandate's ledger"
         )
-    return _MandateInputs(mandate=ctx.mandate, consumed=ctx.consumed, ref_state=ctx.ref_state)
+    return _MandateInputs(mandate=ctx.mandate, ledger=ctx.ledger)
 
 
 def _parse_args(call: ToolCall, tool: ToolSpec) -> BaseModel | Deny:
@@ -153,10 +154,15 @@ def _judge_charge(
         return Deny(reasons=_invalid_args("closed", error))
     if closed.agent_id != ctx.session.agent_id:
         return Deny(reasons=("agent_mismatch",))
+    if inputs.mandate.principal_id != ctx.session.principal_id:
+        return Deny(reasons=("principal_mismatch",))
+    try:
+        consumed = mandates.consumed_in_period(inputs.ledger, inputs.mandate, ctx.now)
+        ref_state = mandates.ref_state(inputs.ledger, closed.charge_ref)
+    except ValueError:
+        return Deny(reasons=("ledger_inconsistent",))
 
-    verdict = mandates.check(
-        closed, inputs.mandate, inputs.consumed, ctx.now, ref_state=inputs.ref_state
-    )
+    verdict = mandates.check(closed, inputs.mandate, consumed, ctx.now, ref_state=ref_state)
     deny_overridable = ctx.config.on_mandate_violation == "deny"
     denied = [v for v in verdict.violations if deny_overridable or v not in _OVERRIDABLE]
     if denied:
