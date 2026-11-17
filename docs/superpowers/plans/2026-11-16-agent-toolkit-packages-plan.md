@@ -185,7 +185,7 @@ def test_money_add_requires_same_currency():
   - `ExceededKind = Literal["iterations", "tool_calls", "tokens", "cost", "consecutive_failures"]`
   - `charge(state: BudgetState, usage: Usage, pricing: Pricing | None) -> BudgetState`
   - `check(state: BudgetState, limits: BudgetLimits) -> tuple[ExceededKind, ...]` (vacía = ok)
-  - `adapters.langchain.BudgetCallbackHandler(limits, pricing)`: `.state`; cuenta tokens desde `usage_metadata` de la respuesta y llamadas/fallas de herramientas; con `raise_error = True` lanza `BudgetExceededError(kinds)` al exceder.
+  - `adapters.langchain.BudgetCallbackHandler(limits, pricing)`: `.state`; cuenta tokens desde `usage_metadata` de la respuesta y llamadas/fallas de herramientas; con `raise_error = True` lanza `BudgetExceededError(kinds)` al exceder y sigue lanzando en todo callback posterior (sticky); la iteración se cobra al iniciar la llamada al LLM; `ValueError` si `max_cost_usd` sin `pricing`.
 
 - [x] **Step 1: Tests de núcleo**: costo = tokens/1e6 × precio, con `Decimal` exacto; `failed=True` incrementa y `failed=False` reinicia `consecutive_failures`; `failed=None` no lo toca; límite alcanzado exactamente (`==`) no excede, `+1` sí; varios tipos excedidos se reportan juntos.
 - [x] **Step 2:** Run → FAIL. **Step 3:** Implementa. **Step 4:** Run → PASS.

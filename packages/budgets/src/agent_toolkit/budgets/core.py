@@ -90,8 +90,9 @@ class BudgetState(BaseModel):
 def charge(state: BudgetState, usage: Usage, pricing: Pricing | None) -> BudgetState:
     """Return `state` plus `usage`.
 
-    Cost is exact `Decimal` arithmetic, never rounded: tokens / 1_000_000 times the per-million
-    price. With `pricing=None` cost stays unchanged, so a cost limit without pricing never trips.
+    Cost is `Decimal` arithmetic with no rounding of its own: tokens / 1_000_000 times the
+    per-million price, exact within the ambient `decimal` context (28 significant digits).
+    With `pricing=None` cost stays unchanged, so a cost limit without pricing never trips.
     """
     cost = state.cost_usd
     if pricing is not None:
