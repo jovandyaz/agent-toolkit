@@ -62,9 +62,9 @@ class ToolSpec(BaseModel):
     fills `agent_id` from the session and mints a new charge's `charge_ref` server-side,
     deterministically from `ctx.thread_id`, `ctx.message_id` and `ctx.call_id` together (for
     example a hash of all three); neither ever comes from the arguments. The builder must be
-    deterministic for a given
-    (args, ctx) and free of side effects: it may run more than once per call (the LangGraph
-    adapter also re-runs `decide` on resume), and an approval binds the charge it showed.
+    deterministic for a given (args, ctx) and free of side effects: it may run more than once
+    per call (the LangGraph adapter also re-runs `decide` on resume), and an approval binds the
+    charge it showed.
     For an `amount_increase` it loads the payer, receiving account and rail from the charge the
     application stored under the `charge_ref` the arguments name; only the amounts come from the
     arguments (`mandates.check` binds `previous_amount` to the ledger, nothing binds the rest).
