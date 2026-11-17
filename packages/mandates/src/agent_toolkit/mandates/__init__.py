@@ -16,8 +16,10 @@ from agent_toolkit.mandates.check import (
 from agent_toolkit.mandates.consumption import (
     ConsumptionEntry,
     EntryKind,
+    RefState,
+    RefStatus,
     consumed_in_period,
-    reserved_for,
+    ref_state,
 )
 from agent_toolkit.mandates.models import (
     Amount,
@@ -52,12 +54,14 @@ __all__ = [
     "OpenMandate",
     "Receipt",
     "ReceiptStatus",
+    "RefState",
+    "RefStatus",
     "Signer",
     "Verdict",
     "Verifier",
     "Violation",
     "check",
     "consumed_in_period",
+    "ref_state",
     "reserve_amount",
-    "reserved_for",
 ]

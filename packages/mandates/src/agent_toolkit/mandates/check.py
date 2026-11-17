@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from agent_toolkit.mandates.consumption import RefState
 from agent_toolkit.mandates.models import Amount, ClosedMandate, OpenMandate, require_aware
 
 Violation = Literal[
@@ -54,21 +55,27 @@ def check(
     consumed: Amount,
     now: datetime,
     *,
-    reserved_for_ref: Amount | None,
+    ref_state: RefState,
 ) -> Verdict:
     """Judge whether `closed` fits `open` at `now`, given the budget `consumed` this period.
 
-    The caller reads both amounts from its trusted ledger, never from tool arguments:
-    `consumed` from `consumed_in_period` (it already includes what a pending link reserved
-    before an increase) and `reserved_for_ref` from `reserved_for(entries, closed.charge_ref)`.
-    A new charge must have nothing reserved for its ref; an increase's claimed `previous_amount`
-    must equal the reserve, which is what makes the budget delta `amount - previous_amount`
-    trustworthy. All violations are collected. An open amount needs approval and skips the
-    range and budget checks, since nothing bounds it. Raises ValueError when `now` is naive.
+    The caller reads both ledger values from this mandate's ledger only, never from tool
+    arguments: `consumed` from `consumed_in_period` (it already includes what a pending link
+    reserved before an increase) and `ref_state` from `ref_state(entries, closed.charge_ref)`.
+    A new charge's ref must be unknown to the ledger (the application mints it server-side);
+    an increase's ref must be reserved for exactly the claimed `previous_amount`, which is what
+    makes the budget delta `amount - previous_amount` trustworthy.
+
+    Concurrency: two checks against the same `consumed` snapshot can both pass and together
+    exceed the budget. The caller must lock the mandate from reading the ledger through
+    recording the reserve.
+
+    All violations are collected. An open amount needs approval and skips the range and budget
+    checks, since nothing bounds it. Raises ValueError when `now` is naive.
     """
     require_aware(now, "now")
     return Verdict(
-        violations=_violations(closed, open, consumed, now, reserved_for_ref),
+        violations=_violations(closed, open, consumed, now, ref_state),
         approval_reasons=_approval_reasons(closed, open),
     )
 
@@ -78,7 +85,7 @@ def _violations(
     mandate: OpenMandate,
     consumed: Amount,
     now: datetime,
-    reserved_for_ref: Amount | None,
+    ref_state: RefState,
 ) -> tuple[Violation, ...]:
     charge_amounts = [a for a in (closed.amount, closed.previous_amount) if a is not None]
     charge_currency_ok = all(a.currency == mandate.currency for a in charge_amounts)
@@ -100,9 +107,11 @@ def _violations(
         found.append("rail_not_allowed")
     if not (charge_currency_ok and consumed_currency_ok):
         found.append("currency_mismatch")
-    if closed.kind == "new_charge" and reserved_for_ref is not None:
+    if closed.kind == "new_charge" and ref_state.status != "unknown":
         found.append("charge_ref_reused")
-    if closed.kind == "amount_increase" and reserved_for_ref != closed.previous_amount:
+    if closed.kind == "amount_increase" and (
+        ref_state.status != "reserved" or ref_state.reserved != closed.previous_amount
+    ):
         found.append("previous_amount_mismatch")
     # Amounts in another currency cannot be bounded; currency_mismatch already rejects them.
     if (

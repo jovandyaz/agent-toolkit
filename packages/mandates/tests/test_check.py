@@ -13,11 +13,12 @@ from agent_toolkit.mandates import (
     ConsumptionEntry,
     DailyWindow,
     OpenMandate,
+    RefState,
     Verdict,
     check,
     consumed_in_period,
+    ref_state,
     reserve_amount,
-    reserved_for,
 )
 
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
@@ -73,15 +74,25 @@ def increase(previous: int, new: int) -> ClosedMandate:
     )
 
 
+UNKNOWN = RefState(status="unknown", reserved=None)
+RELEASED = RefState(status="released", reserved=None)
+
+
+def reserved(minor: int) -> RefState:
+    return RefState(status="reserved", reserved=mxn(minor))
+
+
 def check_consistent(
     closed: ClosedMandate, open_mandate: OpenMandate, consumed: Amount, now: datetime
 ) -> Verdict:
     """`check` with a ledger that agrees with the charge.
 
-    Nothing is reserved yet for a new charge, and an increase's ref holds exactly the claimed
-    `previous_amount`. The ledger tests below pass `reserved_for_ref` explicitly.
+    A new charge's ref is unknown to the ledger, and an increase's ref holds exactly the claimed
+    `previous_amount`. The ledger tests below pass `ref_state` explicitly.
     """
-    return check(closed, open_mandate, consumed, now, reserved_for_ref=closed.previous_amount)
+    previous = closed.previous_amount
+    state = UNKNOWN if previous is None else RefState(status="reserved", reserved=previous)
+    return check(closed, open_mandate, consumed, now, ref_state=state)
 
 
 OK = Verdict(violations=(), approval_reasons=())
@@ -218,7 +229,7 @@ def test_every_violation_is_reported_not_only_the_first() -> None:
         daily_window=window, expires_at=late_night, revoked_at=late_night - timedelta(hours=1)
     )
 
-    verdict = check(bad, gone, mxn(500000), late_night, reserved_for_ref=mxn(1))
+    verdict = check(bad, gone, mxn(500000), late_night, ref_state=reserved(1))
 
     assert verdict.violations == (
         "expired",
@@ -287,7 +298,7 @@ def test_open_amount_still_flags_consumed_in_another_currency() -> None:
 
 def test_naive_now_is_rejected() -> None:
     with pytest.raises(ValueError, match="aware"):
-        check(charge(), mandate(), mxn(0), datetime(2026, 12, 1, 12, 0), reserved_for_ref=None)
+        check(charge(), mandate(), mxn(0), datetime(2026, 12, 1, 12, 0), ref_state=UNKNOWN)
 
 
 def test_charge_by_another_agent_is_violation() -> None:
@@ -296,24 +307,55 @@ def test_charge_by_another_agent_is_violation() -> None:
     assert verdict.violations == ("agent_mismatch",)
 
 
+@pytest.mark.parametrize("state", [reserved(1), RELEASED])
 @pytest.mark.parametrize("amount", [mxn(35000), None])
-def test_new_charge_cannot_reuse_a_ref_with_a_reserve(amount: Amount | None) -> None:
-    verdict = check(charge(amount=amount), mandate(), mxn(0), NOW, reserved_for_ref=mxn(1))
+def test_new_charge_cannot_reuse_a_known_ref(state: RefState, amount: Amount | None) -> None:
+    verdict = check(charge(amount=amount), mandate(), mxn(0), NOW, ref_state=state)
 
     assert verdict.violations == ("charge_ref_reused",)
+
+
+def test_new_charge_cannot_reuse_a_released_ref() -> None:
+    """Security regression: reusing a released ref passed `check` and then broke the ledger.
+
+    Once the app recorded the new reserve, the ledger held reserve, release, reserve for `ch_1`,
+    so every later ledger read for the mandate raised: a model-triggered denial of service.
+    """
+    ledger = [
+        ConsumptionEntry(charge_ref="ch_1", kind="reserve", amount=mxn(30000), at=NOW),
+        ConsumptionEntry(charge_ref="ch_1", kind="release", amount=mxn(30000), at=NOW),
+    ]
+    state = ref_state(ledger, "ch_1")
+    assert state == RELEASED
+
+    verdict = check(charge(charge_ref="ch_1"), mandate(), mxn(0), NOW, ref_state=state)
+
+    assert verdict.violations == ("charge_ref_reused",)
+    recorded = [*ledger, ledger[0]]
+    with pytest.raises(ValueError, match="reserved"):
+        consumed_in_period(recorded, mandate(), NOW)
 
 
 def test_increase_matching_the_ledger_reserve_is_ok() -> None:
     closed = increase(previous=40000, new=50000)
 
-    assert check(closed, mandate(), mxn(40000), NOW, reserved_for_ref=mxn(40000)) == OK
+    assert check(closed, mandate(), mxn(40000), NOW, ref_state=reserved(40000)) == OK
 
 
-@pytest.mark.parametrize("ledger", [None, mxn(39999), mxn(40001), usd(40000)])
-def test_increase_must_match_the_ledger_reserve(ledger: Amount | None) -> None:
+@pytest.mark.parametrize(
+    "state",
+    [
+        UNKNOWN,
+        RELEASED,
+        reserved(39999),
+        reserved(40001),
+        RefState(status="reserved", reserved=usd(40000)),
+    ],
+)
+def test_increase_must_match_the_ledger_reserve(state: RefState) -> None:
     closed = increase(previous=40000, new=50000)
 
-    verdict = check(closed, mandate(), mxn(40000), NOW, reserved_for_ref=ledger)
+    verdict = check(closed, mandate(), mxn(40000), NOW, ref_state=state)
 
     assert verdict.violations == ("previous_amount_mismatch",)
 
@@ -330,8 +372,8 @@ def test_overstated_previous_amount_cannot_understate_the_delta() -> None:
         ConsumptionEntry(charge_ref="ch_9", kind="reserve", amount=mxn(959000), at=NOW),
     ]
     consumed = consumed_in_period(ledger, mandate(), NOW)
-    reserved = reserved_for(ledger, "link_1")
-    assert (consumed, reserved) == (mxn(999000), mxn(40000))
+    state = ref_state(ledger, "link_1")
+    assert (consumed, state) == (mxn(999000), reserved(40000))
 
     def raise_link(previous: int) -> ClosedMandate:
         return charge(
@@ -342,7 +384,7 @@ def test_overstated_previous_amount_cannot_understate_the_delta() -> None:
             amount=mxn(50000),
         )
 
-    lying = check(raise_link(49000), mandate(), consumed, NOW, reserved_for_ref=reserved)
+    lying = check(raise_link(49000), mandate(), consumed, NOW, ref_state=state)
     assert lying.violations == ("previous_amount_mismatch",)
-    honest = check(raise_link(40000), mandate(), consumed, NOW, reserved_for_ref=reserved)
+    honest = check(raise_link(40000), mandate(), consumed, NOW, ref_state=state)
     assert honest.violations == ("budget_exceeded",)

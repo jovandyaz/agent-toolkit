@@ -122,6 +122,13 @@ def test_mandate_rejects_a_wrong_case_time_zone_on_every_os(tz: str) -> None:
         OpenMandate.model_validate(mandate_fields(tz=tz))
 
 
+@pytest.mark.parametrize("tz", ["localtime", "Factory", "posixrules"])
+def test_mandate_rejects_system_specific_zone_keys(tz: str) -> None:
+    # Present on some systems only (or not a real zone): rejected everywhere for portability.
+    with pytest.raises(ValidationError, match="time zone"):
+        OpenMandate.model_validate(mandate_fields(tz=tz))
+
+
 @pytest.mark.parametrize(
     ("start", "end"),
     [(time(22, 0), time(7, 0)), (time(7, 0), time(7, 0))],

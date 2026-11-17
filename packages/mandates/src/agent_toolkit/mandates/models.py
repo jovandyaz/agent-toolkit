@@ -18,10 +18,15 @@ BudgetPeriod = Literal["day", "week", "month", "total"]
 ChargeKind = Literal["new_charge", "amount_increase"]
 
 
+# Keys some systems list as zones but that are not portable place names: `localtime` mirrors
+# the host setting, `Factory` is a placeholder zone, `posixrules` a legacy default.
+_EXCLUDED_ZONES = frozenset({"localtime", "Factory", "posixrules"})
+
+
 @cache
 def _known_time_zones() -> frozenset[str]:
     """IANA keys from the system database and the `tzdata` package, read once per process."""
-    return frozenset(available_timezones())
+    return frozenset(available_timezones()) - _EXCLUDED_ZONES
 
 
 def require_aware(moment: datetime, name: str) -> None:
@@ -151,7 +156,8 @@ class ClosedMandate(BaseModel):
     it). An `amount_increase` raises the pending link `charge_ref` from `previous_amount` to
     `amount`, both present, same currency, and strictly greater; a `new_charge` has no
     `previous_amount`. Fields that come from tool arguments are untrusted: `check` compares
-    `agent_id` and `previous_amount` against the mandate and the ledger.
+    `agent_id` and `previous_amount` against the mandate and the ledger. The application mints
+    a new charge's `charge_ref` server-side; it never takes it from tool arguments.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
