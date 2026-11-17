@@ -147,7 +147,8 @@ so it is not run here:
 ```python notest
 from agent_toolkit.policy_gate.adapters.langgraph import GatedToolNode
 
-builder.add_node("tools", GatedToolNode(tools, specs, context=build_context, on_decision=audit))
+node = GatedToolNode(tools, specs, context=build_context, on_decision=audit, replay=recorded_reply)
+builder.add_node("tools", node)
 # Resume a paused turn from the trusted approval screen only, with JSON:
 graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="json")}), config)
 ```
@@ -170,15 +171,23 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   `tool`, `args`, `reasons`, `closed` (the charge as it will run, or null), `closed_mandate_hash`
   and `request_hash`. An approval binds the thread, call, tool, validated arguments, closed
   mandate and reasons through the `request_hash`; resume with a JSON `ApprovalDecision`.
-- Each call the adapter runs gets an idempotency key in its config
-  (`idempotency_key_from_config`): the SHA-256 hex of the compact JSON array
-  `[thread_id, call_id]`, the same on every execution of that call.
+- Each call the adapter runs gets, in its config, an idempotency key
+  (`idempotency_key_from_config`: the SHA-256 hex of the compact JSON array
+  `[thread_id, call_id]`, the same on every execution of that call) and a fingerprint
+  (`call_fingerprint_from_config`: the SHA-256 hex of its tool, validated arguments and charge
+  hash). The key is unique to the call only while the model provider never repeats a call id
+  within a thread; some emit ids like `call_0` that a later call can reuse.
 - Re-runs. When a tool or `on_decision` raises after some calls of a turn ran, running the thread
-  again executes the whole turn again, with LangGraph replaying stored approvals. A charge under a
-  mandate that already ran and recorded its reserve is then denied (`mandate:charge_ref_reused`,
-  or `mandate:previous_amount_mismatch` for an increase) with a reply that tells the model to
-  check the charge's status, and `on_decision` gets that `Deny`; a call that left no reserve (no
-  mandate, open amount) runs again under the same idempotency key.
+  again executes the whole turn again, with LangGraph replaying stored approvals. Without a replay
+  hook, a charge under a mandate that already ran and recorded its reserve is then denied
+  (`mandate:charge_ref_reused`, or `mandate:previous_amount_mismatch` for an increase) with a
+  reply that tells the model to check the charge's status, and `on_decision` gets that `Deny`; a
+  call that left no reserve (no mandate, open amount) runs again under the same idempotency key.
+- `GatedToolNode(..., replay=hook)`: `hook(key)` returns the `RecordedReply(fingerprint,
+  content)` the application stored under that key when the call ran, or None. A call whose stored
+  fingerprint matches gets the stored reply and is neither decided, reported nor run again; a call
+  whose key matches with another fingerprint reused another call's id and is denied
+  (`call_id_reused`). The node never runs a call the hook answers.
 
 ## Caller duties
 
@@ -193,6 +202,12 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent: send
   `idempotency_key_from_config(config)` as the provider's idempotency key, so a re-run never issues
   a charge twice (not `charge_ref`: an increase keeps its charge's ref).
+- With a replay hook, once a call ran the tool stores `RecordedReply(fingerprint=
+  call_fingerprint_from_config(config), content=reply)` under its idempotency key, in the same
+  transaction as the reserve, and the hook returns only what was stored that way. The builder must
+  give the same charge after the call ran (never read state the call changes), or the re-run is
+  denied `call_id_reused`. Without a hook, a reused call id reaches the tool with an old call's
+  key: only a provider that rejects a reused key with another payload stops it.
 - Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per call
   with its final decision, before the call runs, so an audit log that fails blocks the call.
 - Resume only from the trusted approval screen through an authenticated channel, never from chat

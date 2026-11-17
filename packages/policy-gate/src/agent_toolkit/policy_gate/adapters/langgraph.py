@@ -1,15 +1,32 @@
 """LangGraph tool node that runs the tool calls of a turn only as the policy gate allows.
 
 Install with the `langgraph` extra. Put it where a graph would put `ToolNode`:
-`builder.add_node("tools", GatedToolNode(tools, specs, context, on_decision=audit))`.
+`builder.add_node("tools", GatedToolNode(tools, specs, context, on_decision=audit, replay=...))`.
 
 Each run reads the `tool_calls` of `state["messages"][-1]`, which must be an `AIMessage` (the
 node never looks further back, so re-entering it cannot run a turn twice), and needs
-`configurable["thread_id"]` (ValueError otherwise, before anything is decided). Each call's
-idempotency key is the SHA-256 hex of the compact JSON array `[thread_id, call_id]`: the same
-on every execution of the call, and different for any other call. Then it:
+`configurable["thread_id"]` (ValueError otherwise, before anything is decided). Each call has:
 
-1. Builds the context with `context(state)` and decides every call with
+- an idempotency key, the SHA-256 hex of the compact JSON array `[thread_id, call_id]`, the
+  same on every execution of the call. It is unique to the call only while the model provider
+  never repeats a call id within a thread; some emit short or sequential ids (`call_0`) that a
+  later call of the thread can reuse;
+- a fingerprint of what it asks for, the SHA-256 hex of the canonical JSON (sorted keys, no
+  spaces) of `{"tool", "args", "closed_mandate_hash"}`: its tool, its validated arguments as
+  JSON and the `content_hash` of the charge its builder makes (null if none). Arguments that
+  do not validate are fingerprinted raw, as `{"tool", "raw_args"}`. A reused call id with
+  another tool, other arguments or another charge has another fingerprint.
+
+Then it:
+
+0. Builds the context with `context(state)` and, if `replay` is given, asks `replay(key)` for
+   each call. A `RecordedReply` with the call's fingerprint means the call already ran on an
+   earlier execution: it gets the stored reply (`status="success"`) and is neither decided,
+   reported nor run again (see "Re-runs"). A `RecordedReply` with another fingerprint belongs
+   to another call that used the same call id: this call is denied (`call_id_reused`) and does
+   not run, so a stored reply never stands for a call that did not run. The node never runs a
+   call the hook answers, so a wrong answer cannot run anything.
+1. Decides every other call with
    `decide(..., thread_id=thread_id)`, in order, before running any; a financial tool's builder
    gets `BuildContext(thread_id, call_id)`. Each call is judged against the ledger plus a
    reserve (`mandates.reserve_amount(closed)`, dated `ctx.now`) for every earlier charge of the
@@ -17,9 +34,10 @@ on every execution of the call, and different for any other call. Then it:
    (a later rejection only frees budget). A call on the `charge_ref` of an earlier call of the
    turn that was not denied is denied (`charge_ref_in_turn`, not configurable): its check would
    rest on a reserve that rejecting the earlier call undoes, so multi-step changes to one
-   charge (create then raise, raise twice) must span turns. The rule is checked on the ref the
-   builder gives the call and again on the ref of the charge `decide` checked, so a builder
-   that is not deterministic cannot slip a second change past it. All of this is pure and
+   charge (create then raise, raise twice) must span turns; a replayed call keeps its ref
+   taken. The rule is checked on the ref the builder gives the call and again on the ref of
+   the charge `decide` checked, so a builder that is not deterministic cannot slip a second
+   change past it. All of this is pure and
    deterministic, so the re-run on resume rebuilds the same decisions and hashes. A call to a
    tool missing from `tools` or `specs` is denied (`unknown_tool`).
 2. If calls need approval, pauses the graph with one `interrupt` whose value is plain JSON, as
@@ -43,35 +61,41 @@ on every execution of the call, and different for any other call. Then it:
 4. Runs the allowed and approved calls one at a time, in order, with their validated
    arguments (`args.model_dump(mode="json")`, exactly what the approval showed). The tool's
    config holds the checked `ClosedMandate` (None if the call has none) in
-   `configurable[CLOSED_MANDATE_KEY]` and the call's idempotency key in
-   `configurable[IDEMPOTENCY_KEY]`; a financial tool reads them with
-   `closed_mandate_from_config` and `idempotency_key_from_config`, issues exactly that charge
-   and sends the key to the provider. Every other call gets
+   `configurable[CLOSED_MANDATE_KEY]`, the call's idempotency key in
+   `configurable[IDEMPOTENCY_KEY]` and its fingerprint in `configurable[FINGERPRINT_KEY]`; a
+   financial tool reads them with `closed_mandate_from_config`, `idempotency_key_from_config`
+   and `call_fingerprint_from_config`, issues exactly that charge and sends the key to the
+   provider. Every other call gets
    `ToolMessage(status="error", content="Not executed: <reasons>")`, except a call denied for
    `mandate:charge_ref_reused` or `mandate:previous_amount_mismatch`, which also describe a
    charge that already ran (see "Re-runs"): it gets `ToolMessage(status="error",
    content="Check the charge's status before retrying, it may already exist: <reasons>")`.
-5. Calls `on_decision(call, decision, approval)` once per call with its final decision, always
-   before the call would run: first a `Deny` for every call that does not run, before any
-   tool runs; then, right before each call runs, `Allow`, or `RequireApproval` with the
-   approval that lets it run. So an `on_decision` that raises stops its call, and every call
-   after it, from running: an audit log that cannot record a charge blocks it. A rejection's
-   reasons are its `approval_*` code followed by the gate's, and it carries the human's answer
-   if there was one. The report is the decision, not the result: a call that then fails was
-   reported as allowed. Calls after a failed one are neither reported nor run (see
-   "Re-runs"). The application wires `on_decision` to `audit-log`; its exceptions propagate.
+5. Calls `on_decision(call, decision, approval)` once per decided call with its final
+   decision, always before the call would run: first a `Deny` for every call that does not
+   run, before any tool runs; then, right before each call runs, `Allow`, or `RequireApproval`
+   with the approval that lets it run. So an `on_decision` that raises stops its call, and
+   every call after it, from running: an audit log that cannot record a charge blocks it. A
+   rejection's reasons are its `approval_*` code followed by the gate's, and it carries the
+   human's answer if there was one. The report is the decision, not the result: a call that
+   then fails was reported as allowed. Calls after a failed one are neither reported nor run
+   (see "Re-runs"). The application wires `on_decision` to `audit-log`; its exceptions
+   propagate.
 
 Re-runs. A node is LangGraph's unit of retry. When a tool or `on_decision` raises after some
 calls of the turn ran, the node fails and its replies are lost; running the thread again
 (`graph.invoke(None, config)`) executes the whole turn again, and LangGraph replays the
-approvals it already stored instead of interrupting. Every call is decided and reported again,
-so the audit log can hold two records of one call, and a call that already ran:
+approvals it already stored instead of interrupting. Without `replay`, every call is decided
+and reported again, so the audit log can hold two records of one call, and a call that already
+ran:
 
 - under a mandate, with its reserve recorded, is denied (`mandate:charge_ref_reused`, or
   `mandate:previous_amount_mismatch` for an increase); the model is told to check the charge's
   status, not that it never ran, and `on_decision` receives that `Deny`;
 - without a reserve (no mandate, or an open amount) runs again on the stored approval, with the
   same idempotency key: the tool must not issue it twice (send the key to the provider).
+
+With `replay`, a call whose reply the tool stored is answered with that reply instead: it is
+neither denied nor run again, and not reported again (it was reported before it first ran).
 
 Resume with `graph.invoke(Command(resume={call_id: decision.model_dump(mode="json")}), config)`,
 `decision` an `ApprovalDecision` (its `at` then travels as an ISO 8601 string): the checkpoint
@@ -103,7 +127,15 @@ Duties of the application:
 - Make tools that move money idempotent under `idempotency_key_from_config(config)`: send it
   as the provider's idempotency key, so a re-run (see "Re-runs") never issues a charge twice.
   The key, not `charge_ref`, identifies the call: an increase keeps its charge's ref. Give this
-  node no `RetryPolicy`.
+  node no `RetryPolicy`. If the model provider can repeat call ids within a thread, a reused id
+  gives a new call an old call's key: `replay` denies it (`call_id_reused`); without `replay`,
+  only a provider that rejects a reused key with another payload stops it.
+- With `replay`, once a call ran the tool stores `RecordedReply(fingerprint=
+  call_fingerprint_from_config(config), content=<its reply>)` under
+  `idempotency_key_from_config(config)`, in the same transaction as the charge's reserve, and
+  `replay(key)` returns only what was stored that way (None otherwise). The builder must give
+  the same charge after the call ran (never read state the call itself changes), or the
+  re-run's fingerprint differs and the call is denied `call_id_reused`.
 - Tools must not call `interrupt()`: resuming it re-runs this node, and every call that ran
   before it would run again.
 - Each tool takes exactly the arguments of its spec's `args_model` (checked at construction):
@@ -124,6 +156,7 @@ return content or a `ToolMessage`, not a `Command`.
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -151,10 +184,13 @@ from agent_toolkit.policy_gate.models import (
 
 __all__ = [
     "CLOSED_MANDATE_KEY",
+    "FINGERPRINT_KEY",
     "IDEMPOTENCY_KEY",
     "ApprovalDecision",
     "ApprovalRequest",
     "GatedToolNode",
+    "RecordedReply",
+    "call_fingerprint_from_config",
     "closed_mandate_from_config",
     "idempotency_key_from_config",
 ]
@@ -164,6 +200,9 @@ CLOSED_MANDATE_KEY = "agent_toolkit_closed_mandate"
 
 IDEMPOTENCY_KEY = "agent_toolkit_idempotency_key"
 """Key in `configurable` of the config a tool runs with: the running call's idempotency key."""
+
+FINGERPRINT_KEY = "agent_toolkit_call_fingerprint"
+"""Key in `configurable` of the config a tool runs with: the running call's fingerprint."""
 
 Identifier = Annotated[str, Field(min_length=1)]
 
@@ -183,19 +222,48 @@ def closed_mandate_from_config(config: RunnableConfig) -> ClosedMandate | None:
 
 
 def idempotency_key_from_config(config: RunnableConfig) -> str:
-    """The idempotency key of the running call: stable across re-runs, unique to the call.
+    """The idempotency key of the running call: the same on every execution of the call.
 
     The SHA-256 hex of the compact JSON array `[thread_id, call_id]`. A tool that moves money
     sends it as the provider's idempotency key, so running the turn again never issues the same
-    request twice. Raises ValueError outside `GatedToolNode` (no key) and TypeError if the key
-    holds anything but a string.
+    request twice. It is unique to the call only while the model provider never repeats a call
+    id within the thread (see `call_fingerprint_from_config`). Raises ValueError outside
+    `GatedToolNode` (no key) and TypeError if the key holds anything but a string.
     """
-    key = config.get("configurable", {}).get(IDEMPOTENCY_KEY)
-    if key is None:
-        raise ValueError(f"no {IDEMPOTENCY_KEY} in the config: run the tool through GatedToolNode")
-    if not isinstance(key, str):
-        raise TypeError(f"{IDEMPOTENCY_KEY} holds {type(key).__name__}, not a str")
-    return key
+    return _configured_str(config, IDEMPOTENCY_KEY)
+
+
+def call_fingerprint_from_config(config: RunnableConfig) -> str:
+    """The fingerprint of the running call: its tool, validated arguments and charge, hashed.
+
+    A tool stores it next to its reply under its idempotency key (see `RecordedReply`), so a
+    later call that reuses the call id with another payload is denied instead of replayed.
+    Raises ValueError outside `GatedToolNode` and TypeError if it holds anything but a string.
+    """
+    return _configured_str(config, FINGERPRINT_KEY)
+
+
+def _configured_str(config: RunnableConfig, key: str) -> str:
+    value = config.get("configurable", {}).get(key)
+    if value is None:
+        raise ValueError(f"no {key} in the config: run the tool through GatedToolNode")
+    if not isinstance(value, str):
+        raise TypeError(f"{key} holds {type(value).__name__}, not a str")
+    return value
+
+
+class RecordedReply(BaseModel):
+    """What the application stored when a call ran, for `GatedToolNode(replay=...)`.
+
+    Stored under `idempotency_key_from_config(config)`: `fingerprint` is
+    `call_fingerprint_from_config(config)` and `content` the reply the tool returned. The node
+    replays `content` only for a call with the same fingerprint.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    fingerprint: Identifier
+    content: str
 
 
 class ApprovalRequest(BaseModel):
@@ -239,9 +307,19 @@ class ApprovalDecision(BaseModel):
 
 _ANSWERS = TypeAdapter(dict[str, ApprovalDecision])
 _SAME_CHARGE_IN_TURN = Deny(reasons=("charge_ref_in_turn",))
+_CALL_ID_REUSED = Deny(reasons=("call_id_reused",))
 # Denials that a re-run also gives a charge that already ran: the refusal must not claim that
 # the charge was never executed.
 _MAY_HAVE_RUN = frozenset({"mandate:charge_ref_reused", "mandate:previous_amount_mismatch"})
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """What the node knows of a call before deciding it."""
+
+    key: str  # Idempotency key, from the thread and call ids.
+    fingerprint: str  # What the call asks for: tool, arguments and charge.
+    charge_ref: str | None  # The ref its builder gives it, as `decide` would build it.
 
 
 @dataclass(frozen=True)
@@ -255,10 +333,12 @@ class GatedToolNode[StateT: Mapping[str, object]]:
     """A graph node that decides, asks a human when needed, then runs the turn's tool calls.
 
     `tools` run the calls and `specs` judge them, both keyed by tool name. `context` builds
-    the `GateContext` from trusted state on every execution. See the module docstring for the
-    algorithm and the application's duties. Raises ValueError for repeated tool names, a spec
-    stored under another name than its own, or a tool whose arguments (as the model sends
-    them) are not exactly the fields of its spec's `args_model`.
+    the `GateContext` from trusted state on every execution. `on_decision` reports each
+    decision; `replay(key)` returns the `RecordedReply` stored under an idempotency key, or
+    None. See the module docstring for the algorithm and the application's duties. Raises
+    ValueError for repeated tool names, a spec stored under another name than its own, or a
+    tool whose arguments (as the model sends them) are not exactly the fields of its spec's
+    `args_model`.
     """
 
     def __init__(
@@ -267,6 +347,8 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         specs: Mapping[str, ToolSpec],
         context: Callable[[StateT], GateContext],
         on_decision: Callable[[ToolCall, Decision, ApprovalDecision | None], None] | None = None,
+        *,
+        replay: Callable[[str], RecordedReply | None] | None = None,
     ) -> None:
         by_name = {tool.name: tool for tool in tools}
         if len(by_name) != len(tools):
@@ -281,48 +363,109 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         self._specs = dict(specs)
         self._context = context
         self._on_decision = on_decision
+        self._replay = replay
 
     def __call__(self, state: StateT, config: RunnableConfig) -> dict[str, list[ToolMessage]]:
         calls = _tool_calls(state)
         if not calls:
             return {"messages": []}
         thread_id = _thread_id(config)
-        decisions = self._decide_in_order(calls, self._context(state), thread_id)
+        ctx = self._context(state)
+        plans = {call.id: self._plan(call, ctx, thread_id) for call in calls}
+        replayed, reused = self._recall(calls, plans)
+        decisions = self._decide_in_order(calls, plans, replayed.keys(), reused, ctx, thread_id)
         requests = _requests(calls, decisions, thread_id)
         answers = _ask(list(requests.values()))
-        outcomes = [
-            _resolve(call, decision, requests.get(call.id), answers)
-            for call, decision in zip(calls, decisions, strict=True)
-        ]
+        outcomes = {
+            call.id: _resolve(call, decision, requests.get(call.id), answers)
+            for call in calls
+            if (decision := decisions.get(call.id)) is not None
+        }
 
-        for outcome in outcomes:  # Report what will not run before anything runs.
+        for outcome in outcomes.values():  # Report what will not run before anything runs.
             if isinstance(outcome.decision, Deny):
                 self._report(outcome)
         replies: list[ToolMessage] = []
-        for outcome in outcomes:
+        for call in calls:
+            if call.id in replayed:  # It ran on an earlier execution: never run it again.
+                replies.append(_replayed(call, replayed[call.id]))
+                continue
+            outcome = outcomes[call.id]
             if isinstance(outcome.decision, Deny):
-                replies.append(_refusal(outcome.call, outcome.decision))
+                replies.append(_refusal(call, outcome.decision))
                 continue
             self._report(outcome)  # Before it runs: a failing audit log stops the call.
-            key = _idempotency_key(thread_id, outcome.call.id)
-            replies.append(self._run(outcome.call, outcome.decision, config, key))
+            replies.append(self._run(call, outcome.decision, config, plans[call.id]))
         return {"messages": replies}
 
+    def _plan(self, call: ToolCall, ctx: GateContext, thread_id: str) -> _Plan:
+        """The call's key, fingerprint and planned `charge_ref`, as `decide` would build it."""
+        spec = self._specs.get(call.name)
+        args = None if spec is None else _parsed_args(call, spec)
+        closed = None
+        build = None if spec is None else spec.to_closed_mandate
+        if args is not None and build is not None and ctx.mandate is not None:
+            try:
+                closed = build(args, BuildContext(thread_id=thread_id, call_id=call.id))
+            except ValueError:  # `decide` denies the call (`invalid_args:closed…`).
+                closed = None
+        return _Plan(
+            key=_idempotency_key(thread_id, call.id),
+            fingerprint=_fingerprint(call, args, closed),
+            charge_ref=None if closed is None else closed.charge_ref,
+        )
+
+    def _recall(
+        self, calls: Sequence[ToolCall], plans: Mapping[str, _Plan]
+    ) -> tuple[dict[str, str], set[str]]:
+        """Stored replies of the calls that already ran, and the ids reused by another call."""
+        replayed: dict[str, str] = {}
+        reused: set[str] = set()
+        if self._replay is None:
+            return replayed, reused
+        for call in calls:
+            plan = plans[call.id]
+            recorded = self._replay(plan.key)
+            if recorded is None:
+                continue
+            if not isinstance(recorded, RecordedReply):
+                raise TypeError(f"replay returned {type(recorded).__name__}, not a RecordedReply")
+            if recorded.fingerprint == plan.fingerprint:
+                replayed[call.id] = recorded.content
+            else:
+                reused.add(call.id)
+        return replayed, reused
+
     def _decide_in_order(
-        self, calls: Sequence[ToolCall], ctx: GateContext, thread_id: str
-    ) -> list[Decision]:
+        self,
+        calls: Sequence[ToolCall],
+        plans: Mapping[str, _Plan],
+        replayed: AbstractSet[str],
+        reused: AbstractSet[str],
+        ctx: GateContext,
+        thread_id: str,
+    ) -> dict[str, Decision]:
         """Decide each call against the ledger plus the reserves of the turn's earlier charges.
 
         A call on a charge that an earlier call of the turn may still change is denied
         (`charge_ref_in_turn`): its check would rest on a reserve that rejecting the earlier
         call undoes. Budget alone needs no such rule: a rejection only frees budget. The ref is
         checked before deciding (as the builder plans it) and after (as `decide` checked it).
+        A `replayed` call already ran: it is not decided (its reserve is on the ledger) but
+        keeps its ref taken. A `reused` call has the id of another call that ran: it is denied.
         """
-        decisions: list[Decision] = []
-        taken: set[str] = set()  # Refs of the turn's charges that may still run.
+        decisions: dict[str, Decision] = {}
+        taken: set[str] = set()  # Refs of the turn's charges that ran or may still run.
         for call in calls:
-            if self._planned_ref(call, ctx, thread_id) in taken:
-                decision: Decision = _SAME_CHARGE_IN_TURN
+            planned = plans[call.id].charge_ref
+            if call.id in replayed:
+                if planned is not None:
+                    taken.add(planned)
+                continue
+            if call.id in reused:
+                decision: Decision = _CALL_ID_REUSED
+            elif planned in taken:
+                decision = _SAME_CHARGE_IN_TURN
             else:
                 decision = self._decide(call, ctx, thread_id)
             closed = None if isinstance(decision, Deny) else decision.closed
@@ -330,21 +473,9 @@ class GatedToolNode[StateT: Mapping[str, object]]:
                 decision = _SAME_CHARGE_IN_TURN
             elif closed is not None:
                 taken.add(closed.charge_ref)
-            decisions.append(decision)
+            decisions[call.id] = decision
             ctx = _with_reserve(ctx, decision)
         return decisions
-
-    def _planned_ref(self, call: ToolCall, ctx: GateContext, thread_id: str) -> str | None:
-        """The `charge_ref` the call's builder gives it, as `decide` would build it, if any."""
-        spec = self._specs.get(call.name)
-        if spec is None or spec.to_closed_mandate is None or ctx.mandate is None:
-            return None
-        try:
-            args = spec.args_model.model_validate(call.args, strict=True, extra="forbid")
-            build_ctx = BuildContext(thread_id=thread_id, call_id=call.id)
-            return spec.to_closed_mandate(args, build_ctx).charge_ref
-        except ValueError:  # `decide` denies the call (`invalid_args:…`).
-            return None
 
     def _decide(self, call: ToolCall, ctx: GateContext, thread_id: str) -> Decision:
         spec = self._specs.get(call.name)
@@ -353,12 +484,17 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         return decide(call, spec, ctx, thread_id=thread_id)
 
     def _run(
-        self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig, key: str
+        self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig, plan: _Plan
     ) -> ToolMessage:
         validated = tool_call(name=call.name, args=_json_args(decision), id=call.id)
         # Always set, None included, so a value the caller put under a key never reaches a tool.
         checked = patch_config(
-            config, configurable={CLOSED_MANDATE_KEY: decision.closed, IDEMPOTENCY_KEY: key}
+            config,
+            configurable={
+                CLOSED_MANDATE_KEY: decision.closed,
+                IDEMPOTENCY_KEY: plan.key,
+                FINGERPRINT_KEY: plan.fingerprint,
+            },
         )
         output = self._tools[call.name].invoke(validated, checked)
         if not isinstance(output, ToolMessage):
@@ -411,8 +547,31 @@ def _with_reserve(ctx: GateContext, decision: Decision) -> GateContext:
     return ctx.model_copy(update={"ledger": (*ctx.ledger, entry)})
 
 
+def _parsed_args(call: ToolCall, spec: ToolSpec) -> BaseModel | None:
+    """The call's arguments as `decide` validates them, or None if they do not validate."""
+    try:
+        return spec.args_model.model_validate(call.args, strict=True, extra="forbid")
+    except ValidationError:
+        return None
+
+
 def _idempotency_key(thread_id: str, call_id: str) -> str:
     canonical = json.dumps([thread_id, call_id], separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _fingerprint(call: ToolCall, args: BaseModel | None, closed: ClosedMandate | None) -> str:
+    content: dict[str, object]
+    if args is None:  # Arguments that do not validate never run; another shape, never equal.
+        content = {"tool": call.name, "raw_args": dict(call.args)}
+    else:
+        closed_hash = None if closed is None else closed.content_hash
+        content = {
+            "tool": call.name,
+            "args": args.model_dump(mode="json"),
+            "closed_mandate_hash": closed_hash,
+        }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -421,12 +580,12 @@ def _json_args(decision: Allow | RequireApproval) -> dict[str, object]:
 
 
 def _requests(
-    calls: Sequence[ToolCall], decisions: Sequence[Decision], thread_id: str
+    calls: Sequence[ToolCall], decisions: Mapping[str, Decision], thread_id: str
 ) -> dict[str, ApprovalRequest]:
     return {
         call.id: _request(call, decision, thread_id)
-        for call, decision in zip(calls, decisions, strict=True)
-        if isinstance(decision, RequireApproval)
+        for call in calls
+        if isinstance(decision := decisions.get(call.id), RequireApproval)
     }
 
 
@@ -498,6 +657,10 @@ def _resolve(
 
 def _rejected(code: str, decision: RequireApproval) -> Deny:
     return Deny(reasons=(code, *decision.reasons))
+
+
+def _replayed(call: ToolCall, content: str) -> ToolMessage:
+    return ToolMessage(content=content, tool_call_id=call.id, name=call.name)
 
 
 def _refusal(call: ToolCall, deny: Deny) -> ToolMessage:

@@ -50,10 +50,13 @@ from agent_toolkit.policy_gate import (
 )
 from agent_toolkit.policy_gate.adapters.langgraph import (
     CLOSED_MANDATE_KEY,
+    FINGERPRINT_KEY,
     IDEMPOTENCY_KEY,
     ApprovalDecision,
     ApprovalRequest,
     GatedToolNode,
+    RecordedReply,
+    call_fingerprint_from_config,
     closed_mandate_from_config,
     idempotency_key_from_config,
 )
@@ -164,7 +167,8 @@ class FakeTool:
     """A tool that records the arguments, closed mandate and idempotency key of every run.
 
     With `reserves_into`, it also records the reserve of the charge it issued, as the
-    application's money tool must.
+    application's money tool must; with `replies_into`, its reply under its idempotency key,
+    for a replay hook.
     """
 
     name: str
@@ -172,9 +176,11 @@ class FakeTool:
     runs: list[dict[str, object]] = field(default_factory=list)
     closed_seen: list[ClosedMandate | None] = field(default_factory=list)
     keys_seen: list[str] = field(default_factory=list)
+    fingerprints_seen: list[str] = field(default_factory=list)
     fails_with: Exception | None = None
     handles_errors: bool = False
     reserves_into: list[ConsumptionEntry] | None = None
+    replies_into: dict[str, RecordedReply] | None = None
 
     def as_tool(self) -> BaseTool:
         def run(config: RunnableConfig, **kwargs: object) -> str:
@@ -182,6 +188,7 @@ class FakeTool:
             closed = closed_mandate_from_config(config)
             self.closed_seen.append(closed)
             self.keys_seen.append(idempotency_key_from_config(config))
+            self.fingerprints_seen.append(call_fingerprint_from_config(config))
             if self.fails_with is not None:
                 raise self.fails_with
             reserved = None if closed is None else mandates.reserve_amount(closed)
@@ -190,7 +197,12 @@ class FakeTool:
                     charge_ref=closed.charge_ref, kind="reserve", amount=reserved, at=NOW
                 )
                 self.reserves_into.append(entry)
-            return f"{self.name} ran"
+            reply = f"{self.name} ran"
+            if self.replies_into is not None:
+                fingerprint = call_fingerprint_from_config(config)
+                recorded = RecordedReply(fingerprint=fingerprint, content=reply)
+                self.replies_into[idempotency_key_from_config(config)] = recorded
+            return reply
 
         return StructuredTool.from_function(
             func=run,
@@ -263,6 +275,8 @@ class Rig:
     ran_at_report: list[tuple[str, int]] = field(default_factory=list)
     audit_error: Exception | None = None  # Raised by `record`, as a failing audit log would.
     recorded: list[ConsumptionEntry] = field(default_factory=list)  # Reserves tools recorded.
+    stored: dict[str, RecordedReply] = field(default_factory=dict)  # Tools' replies, by key.
+    replay: Callable[[str], RecordedReply | None] | None = None
     contexts_built: int = 0
     thread: RunnableConfig = field(
         default_factory=lambda: RunnableConfig(configurable={"thread_id": str(uuid.uuid4())})
@@ -282,6 +296,7 @@ class Rig:
             specs=specs,
             context=self.build_context,
             on_decision=self.record,
+            replay=self.replay,
         )
 
     @property
@@ -303,6 +318,13 @@ class Rig:
         """This rig, with a charge tool that records its reserves into the context's ledger."""
         self.charge.reserves_into = self.recorded
         return self
+
+    def replaying(self) -> "Rig":
+        """This rig, with tools that store their replies and a replay hook that reads them."""
+        for fake in (self.lookup, self.delete, self.charge):
+            fake.replies_into = self.stored
+        self.replay = self.stored.get
+        return self.recording_reserves()
 
     def record(self, call: ToolCall, decision: Decision, approval: ApprovalDecision | None) -> None:
         if self.audit_error is not None:
@@ -983,6 +1005,39 @@ def test_idempotency_key_from_config_needs_the_node() -> None:
         idempotency_key_from_config(RunnableConfig())
     with pytest.raises(TypeError, match="str"):
         idempotency_key_from_config(RunnableConfig(configurable={IDEMPOTENCY_KEY: 7}))
+    with pytest.raises(ValueError, match="GatedToolNode"):
+        call_fingerprint_from_config(RunnableConfig())
+    with pytest.raises(TypeError, match="str"):
+        call_fingerprint_from_config(RunnableConfig(configurable={FINGERPRINT_KEY: 7}))
+
+
+def expected_fingerprint(tool: str, args: dict[str, object], closed: ClosedMandate | None) -> str:
+    """The documented fingerprint: tool, validated arguments and the charge's content hash."""
+    content = {
+        "tool": tool,
+        "args": args,
+        "closed_mandate_hash": None if closed is None else closed.content_hash,
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def test_each_call_gets_a_fingerprint_of_its_tool_arguments_and_charge() -> None:
+    rig = Rig()
+    config = RunnableConfig(configurable={"thread_id": rig.thread_id, FINGERPRINT_KEY: "forged"})
+    charge = call("request_payment", "c2", payer=" cust-juan ", amount_minor=35000)
+
+    rig.graph().invoke(turn(call("lookup_customer", "c1"), charge), config)
+
+    charge_args = ChargeArgs(payer="cust-juan", amount_minor=35000)
+    assert rig.lookup.fingerprints_seen == [
+        expected_fingerprint("lookup_customer", {"customer_id": "cust-c1"}, None)
+    ]
+    assert rig.charge.fingerprints_seen == [
+        expected_fingerprint(
+            "request_payment", charge_args.model_dump(mode="json"), rig.built(charge_args, "c2")
+        )
+    ]
 
 
 def fail_once(rig: Rig) -> None:
@@ -1062,6 +1117,160 @@ def test_re_run_after_an_approved_call_without_a_reserve_runs_it_again_under_its
     assert len(rig.charge.runs) == 2
     assert rig.charge.keys_seen == 2 * [expected_key(rig.thread_id, "c1")]
     assert replies(again)["c1"].status == "success"
+
+
+@pytest.mark.parametrize(
+    ("context", "charge"),
+    [
+        pytest.param(
+            gate_context(),
+            call("request_payment", "c1", payer="cust-juan", amount_minor=35000),
+            id="new_charge",
+        ),
+        pytest.param(link_reserved(30000), increase("c1", 30000, 45000), id="amount_increase"),
+        pytest.param(
+            gate_context(mandate=None, ledger=None),
+            call("request_payment", "c1", payer="cust-juan", amount_minor=35000),
+            id="no_mandate",
+        ),
+        pytest.param(
+            gate_context(), call("request_payment", "c1", payer="cust-juan"), id="open_amount"
+        ),
+    ],
+)
+def test_replay_answers_a_call_that_already_ran(context: GateContext, charge: LcToolCall) -> None:
+    # With the hook, the re-run neither denies c1 nor runs it again: it replies what c1 stored.
+    rig = Rig(context=context).replaying()
+    fail_once(rig)
+    graph = rig.graph()
+    with pytest.raises(RuntimeError, match="provider down"):
+        first = graph.invoke(turn(charge, call("lookup_customer", "c2")), rig.thread)
+        # Only a call that needs approval gets here; the approved resume then fails.
+        graph.invoke(Command(resume={r.call_id: answer(r) for r in pending(first)}), rig.thread)
+    assert len(rig.charge.runs) == 1
+    rig.lookup.fails_with = None
+    rig.reports.clear()
+
+    again = graph.invoke(None, rig.thread)
+
+    assert len(rig.charge.runs) == 1
+    reply = replies(again)["c1"]
+    assert (reply.status, reply.content, reply.name) == (
+        "success",
+        "request_payment ran",
+        "request_payment",
+    )
+    assert [(c.id, d.kind) for c, d, _ in rig.reports] == [("c2", "allow")]  # c1 not again.
+    assert replies(again)["c2"].status == "success"
+
+
+def test_replay_never_runs_a_call_and_leaves_the_others_to_the_gate() -> None:
+    # The node never runs a call the hook answers; every call it does not answer is gated.
+    rig = Rig()
+    asked: list[str] = []
+
+    ran = RecordedReply(
+        fingerprint=expected_fingerprint("delete_customer", {"customer_id": "cust-c1"}, None),
+        content="recorded earlier",
+    )
+
+    def replay(key: str) -> RecordedReply | None:
+        asked.append(key)
+        return ran if key == expected_key(rig.thread_id, "c1") else None
+
+    rig.replay = replay
+    graph = rig.graph()
+    first = graph.invoke(
+        turn(call("delete_customer", "c1"), call("delete_customer", "c2")), rig.thread
+    )
+    (request,) = pending(first)
+    assert request.call_id == "c2"  # c1 is neither decided nor put to a human.
+
+    resumed = graph.invoke(Command(resume={"c2": answer(request, approved=False)}), rig.thread)
+
+    assert rig.delete.runs == []
+    assert replies(resumed)["c1"].content == "recorded earlier"
+    assert replies(resumed)["c2"].content == "Not executed: approval_rejected, high_risk"
+    assert [c.id for c, _, _ in rig.reports] == ["c2"]
+    assert asked[:2] == [expected_key(rig.thread_id, call_id) for call_id in ("c1", "c2")]
+
+
+def test_a_replayed_change_still_takes_its_charge_for_the_turn() -> None:
+    # c2 changes the charge c1 already changed: it is denied on the re-run as on the first run,
+    # although the ledger now holds the reserve c2 claims as its previous amount.
+    rig = Rig(context=link_reserved(30000)).replaying()
+    fail_once(rig)
+    graph = rig.graph()
+    calls = turn(
+        increase("c1", 30000, 45000), increase("c2", 45000, 50000), call("lookup_customer", "c3")
+    )
+    with pytest.raises(RuntimeError, match="provider down"):
+        graph.invoke(calls, rig.thread)
+    rig.lookup.fails_with = None
+
+    again = graph.invoke(None, rig.thread)
+
+    assert [run["amount_minor"] for run in rig.charge.runs] == [45000]
+    assert replies(again)["c2"].content == "Not executed: charge_ref_in_turn"
+
+
+def test_replay_must_return_a_recorded_reply() -> None:
+    rig = Rig()
+    rig.replay = lambda key: "lookup_customer ran"  # type: ignore[assignment,return-value]
+
+    with pytest.raises(TypeError, match="RecordedReply"):
+        rig.graph().invoke(turn(call("lookup_customer", "c1")), rig.thread)
+    assert rig.total_runs() == 0
+
+
+def test_a_call_id_reused_with_the_same_payload_replays() -> None:
+    # Some providers number calls per turn (`call_0`): the same request under the same key is
+    # the same call, as with an HTTP idempotency key, so it gets the stored reply.
+    rig = Rig().replaying()
+    graph = rig.graph()
+    graph.invoke(turn(call("lookup_customer", "call_0")), rig.thread)
+
+    later = graph.invoke(turn(call("lookup_customer", "call_0")), rig.thread)
+
+    assert len(rig.lookup.runs) == 1
+    assert replies(later)["call_0"].content == "lookup_customer ran"
+
+
+@pytest.mark.parametrize(
+    ("first", "then"),
+    [
+        pytest.param(
+            call("lookup_customer", "call_0", customer_id="cust-1"),
+            call("lookup_customer", "call_0", customer_id="cust-2"),
+            id="other_args",
+        ),
+        pytest.param(
+            call("lookup_customer", "call_0"), call("delete_customer", "call_0"), id="other_tool"
+        ),
+        pytest.param(
+            call("request_payment", "call_0", payer="cust-juan", amount_minor=35000),
+            call("request_payment", "call_0", payer="cust-juan", amount_minor=50000),
+            id="other_charge",
+        ),
+    ],
+)
+def test_a_call_id_reused_with_another_payload_is_denied(
+    first: LcToolCall, then: LcToolCall
+) -> None:
+    # Same key, different request: replaying would report a call that never ran as done.
+    rig = Rig().replaying()
+    graph = rig.graph()
+    graph.invoke(turn(first), rig.thread)
+    ran_before = rig.total_runs()
+    rig.reports.clear()
+
+    later = graph.invoke(turn(then), rig.thread)
+
+    assert "__interrupt__" not in later
+    assert rig.total_runs() == ran_before == 1
+    reply = replies(later)["call_0"]
+    assert (reply.status, reply.content) == ("error", "Not executed: call_id_reused")
+    assert [(c.id, d) for c, d, _ in rig.reports] == [("call_0", Deny(reasons=("call_id_reused",)))]
 
 
 # Unknown tools, bad input and configuration.
