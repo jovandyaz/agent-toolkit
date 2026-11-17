@@ -160,6 +160,14 @@ def builder_over(stored: Mapping[str, StoredCharge]) -> Builder:
     return lambda args, ctx: new_charge(args, mint_ref(ctx), stored)
 
 
+def build_trusting_args(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
+    """A careless builder: an increase takes its payer from the arguments, not from the store."""
+    assert isinstance(args, ChargeArgs)
+    if args.previous_amount_minor is None or args.link_ref is None:
+        return build_charge(args, ctx)
+    return new_charge(args, mint_ref(ctx), {args.link_ref: StoredCharge(payer=args.payer)})
+
+
 def build_with_random_ref(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     """A careless builder: a fresh ref on every call, so the re-run builds another charge."""
     return new_charge(args, f"ch_{uuid.uuid4().hex}")
@@ -956,10 +964,22 @@ def test_a_step_after_a_pending_change_of_its_charge_never_runs(approved: bool) 
     assert replies(resumed)["b"].content == "Not executed: charge_ref_in_turn"
 
 
-def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
-    # The builder loads an increase's charge from the store, which knows c1 only once it ran,
-    # so c2 cannot even be built (`charge_ref_in_turn` backs this up for builders that can).
-    rig = Rig()
+@pytest.mark.parametrize(
+    ("builder", "refusal"),
+    [
+        # The application's builder loads an increase's charge from the store, which knows c1
+        # only once it ran, so c2 cannot even be built.
+        pytest.param(
+            build_charge, "Not executed: invalid_args:closed:value_error", id="from_store"
+        ),
+        # A builder that can build c2 without the store: `charge_ref_in_turn` still denies it.
+        pytest.param(build_trusting_args, "Not executed: charge_ref_in_turn", id="from_args"),
+    ],
+)
+def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied(
+    builder: Builder, refusal: str
+) -> None:
+    rig = Rig(builder=builder)
     created = call("request_payment", "c1", payer="cust-juan", amount_minor=35000)
     raised = call(
         "request_payment",
@@ -973,7 +993,7 @@ def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
     result = rig.graph().invoke(turn(created, raised), rig.thread)
 
     assert [run["amount_minor"] for run in rig.charge.runs] == [35000]
-    assert replies(result)["c2"].content == "Not executed: invalid_args:closed:value_error"
+    assert replies(result)["c2"].content == refusal
 
 
 @pytest.mark.parametrize("named_payer", ["cust-juan", "cust-stranger"])
