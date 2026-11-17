@@ -1,0 +1,17 @@
+[project]
+name = "agent-toolkit-audit-log"
+version = "0.1.0a1"
+description = "Append-only, hash-chained audit log of agent decisions, approvals and effects, with actor identity."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.3,<4"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.audit_log"
