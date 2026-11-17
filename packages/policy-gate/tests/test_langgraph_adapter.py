@@ -22,7 +22,14 @@ from pydantic import BaseModel, ConfigDict
 
 from agent_toolkit.budgets import BudgetLimits, BudgetState
 from agent_toolkit.budgets.adapters.langchain import BudgetCallbackHandler, BudgetExceededError
-from agent_toolkit.mandates import Amount, AmountRange, Budget, ClosedMandate, OpenMandate
+from agent_toolkit.mandates import (
+    Amount,
+    AmountRange,
+    Budget,
+    ClosedMandate,
+    ConsumptionEntry,
+    OpenMandate,
+)
 from agent_toolkit.policy_gate import (
     Allow,
     Decision,
@@ -63,6 +70,8 @@ class ChargeArgs(BaseModel):
 
     payer: str
     amount_minor: int | None = None  # None: the payer sets the amount.
+    previous_amount_minor: int | None = None  # An increase of the pending link `link_ref`.
+    link_ref: str | None = None
 
 
 class ToolChargeArgs(BaseModel):
@@ -70,23 +79,27 @@ class ToolChargeArgs(BaseModel):
 
     payer: str
     amount_minor: int | None = None
+    previous_amount_minor: int | None = None
+    link_ref: str | None = None
 
 
 Builder = Callable[[BaseModel, str], ClosedMandate]
 
 
 def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
+    """A new charge under `charge_ref`, or an increase of the link the arguments name."""
     assert isinstance(args, ChargeArgs)
+    previous = args.previous_amount_minor
     return ClosedMandate(
         open_mandate_id="om_1",
         agent_id="agent_1",
-        kind="new_charge",
-        charge_ref=charge_ref,
+        kind="new_charge" if previous is None else "amount_increase",
+        charge_ref=args.link_ref or charge_ref,
         payer=args.payer,
         receiving_account="acct-own",
         rail="codi_push",
         amount=None if args.amount_minor is None else mxn(args.amount_minor),
-        previous_amount=None,
+        previous_amount=None if previous is None else mxn(previous),
         reference="R-1",
     )
 
@@ -253,12 +266,14 @@ class Rig:
     def total_runs(self) -> int:
         return len(self.lookup.runs) + len(self.delete.runs) + len(self.charge.runs)
 
-    def graph(self, node: Any = None) -> CompiledStateGraph[Any, Any, Any, Any]:
+    def graph(
+        self, node: Any = None, *, durable: bool = True
+    ) -> CompiledStateGraph[Any, Any, Any, Any]:
         builder = StateGraph(MessagesState)
         builder.add_node("tools", node if node is not None else self.node())
         builder.add_edge(START, "tools")
         builder.add_edge("tools", END)
-        return builder.compile(checkpointer=InMemorySaver())
+        return builder.compile(checkpointer=InMemorySaver() if durable else None)
 
 
 def call(name: str, call_id: str, **args: object) -> LcToolCall:
@@ -627,7 +642,12 @@ def test_approved_financial_call_runs_with_the_validated_args() -> None:
     (request,) = pending(
         graph.invoke(turn(call("request_payment", "c1", payer=" cust-juan ")), rig.thread)
     )
-    assert request.args == {"payer": "cust-juan", "amount_minor": None}
+    assert request.args == {
+        "payer": "cust-juan",
+        "amount_minor": None,
+        "previous_amount_minor": None,
+        "link_ref": None,
+    }
 
     graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
 
@@ -637,6 +657,99 @@ def test_approved_financial_call_runs_with_the_validated_args() -> None:
     assert decision.closed is not None
     assert decision.closed.content_hash == request.closed_mandate_hash
     assert approval == answer(request)
+
+
+def test_charges_in_one_turn_share_the_mandate_budget() -> None:
+    # Each charge is judged with the reserves of the turn's earlier charges: 3 x 400k > 1M.
+    rig = Rig()
+    graph = rig.graph()
+    charges = [
+        call("request_payment", f"c{n}", payer="cust-juan", amount_minor=400000) for n in (1, 2, 3)
+    ]
+    (request,) = pending(graph.invoke(turn(*charges), rig.thread))
+    assert (request.call_id, request.reasons) == ("c3", ("mandate:budget_exceeded",))
+    assert rig.charge.runs == []
+
+    resumed = graph.invoke(Command(resume={"c3": answer(request, approved=False)}), rig.thread)
+
+    assert [run["amount_minor"] for run in rig.charge.runs] == [400000, 400000]
+    assert replies(resumed)["c3"].content == (
+        "Not executed: approval_rejected, mandate:budget_exceeded"
+    )
+
+
+def test_charges_in_one_turn_share_the_budget_when_violations_deny() -> None:
+    rig = Rig(context=gate_context(config=GateConfig(on_mandate_violation="deny")))
+    charges = [
+        call("request_payment", f"c{n}", payer="cust-juan", amount_minor=400000) for n in (1, 2, 3)
+    ]
+
+    result = rig.graph().invoke(turn(*charges), rig.thread)
+
+    assert "__interrupt__" not in result
+    assert len(rig.charge.runs) == 2
+    assert replies(result)["c3"].content == "Not executed: mandate:budget_exceeded"
+
+
+def test_a_charge_waiting_for_approval_also_reserves_budget() -> None:
+    # It may still run once approved, so the charges after it are judged as if it will.
+    rig = Rig()
+    charges = turn(
+        call("request_payment", "c1", payer="cust-ana", amount_minor=400000),
+        call("request_payment", "c2", payer="cust-juan", amount_minor=400000),
+        call("request_payment", "c3", payer="cust-juan", amount_minor=400000),
+    )
+
+    requests = pending(rig.graph().invoke(charges, rig.thread))
+
+    assert [(request.call_id, request.reasons) for request in requests] == [
+        ("c1", ("mandate:payer_not_allowed",)),
+        ("c3", ("mandate:budget_exceeded",)),
+    ]
+
+
+def test_two_increases_of_one_link_in_one_turn() -> None:
+    # The first increase reserves its delta, so the second no longer starts from 30000.
+    link = ConsumptionEntry(charge_ref="ch_link", kind="reserve", amount=mxn(30000), at=NOW)
+    rig = Rig(context=gate_context(ledger=(link,)))
+
+    def increase(call_id: str, amount_minor: int) -> LcToolCall:
+        return call(
+            "request_payment",
+            call_id,
+            payer="cust-juan",
+            amount_minor=amount_minor,
+            previous_amount_minor=30000,
+            link_ref="ch_link",
+        )
+
+    result = rig.graph().invoke(turn(increase("c1", 45000), increase("c2", 50000)), rig.thread)
+
+    assert "__interrupt__" not in result
+    assert [run["amount_minor"] for run in rig.charge.runs] == [45000]
+    assert replies(result)["c2"].content == "Not executed: mandate:previous_amount_mismatch"
+
+
+def test_approval_does_not_carry_over_to_another_thread() -> None:
+    # Same call id and arguments in another conversation: the approval must not apply there.
+    first, other = Rig(), Rig()
+    (request,) = pending(first.graph().invoke(turn(call("delete_customer", "c1")), first.thread))
+    graph = other.graph()
+    (other_request,) = pending(graph.invoke(turn(call("delete_customer", "c1")), other.thread))
+    assert other_request.request_hash != request.request_hash
+
+    resumed = graph.invoke(Command(resume={"c1": answer(request)}), other.thread)
+
+    assert other.delete.runs == []
+    assert replies(resumed)["c1"].content == "Not executed: approval_mismatch, high_risk"
+
+
+def test_approval_needs_a_thread_id() -> None:
+    rig = Rig()
+
+    with pytest.raises(ValueError, match="thread_id"):
+        rig.graph(durable=False).invoke(turn(call("delete_customer", "c1")))
+    assert rig.total_runs() == 0
 
 
 # Unknown tools, bad input and configuration.
@@ -701,15 +814,30 @@ def test_rejects_ambiguous_configuration() -> None:
         GatedToolNode(tools=[tool], specs={"lookup": LOOKUP}, context=gate_ctx)
 
 
+class NotedArgs(CustomerArgs):
+    """A tool schema with an argument the spec never validates nor shows a human."""
+
+    note: str = "added by the tool"
+
+
+def test_tool_arguments_must_match_its_spec() -> None:
+    lax = FakeTool("lookup_customer", args_schema=NotedArgs).as_tool()
+    with pytest.raises(ValueError, match="arguments"):
+        GatedToolNode(tools=[lax], specs={"lookup_customer": LOOKUP}, context=gate_ctx)
+
+
 # Errors: none is swallowed.
 
 
-def test_tool_error_propagates() -> None:
+def test_tool_error_propagates_after_its_call_is_reported() -> None:
+    # An approved charge whose provider call failed still leaves an audit record.
     rig = Rig(lookup=FakeTool("lookup_customer", fails_with=RuntimeError("provider down")))
 
     with pytest.raises(RuntimeError, match="provider down"):
-        rig.graph().invoke(turn(call("lookup_customer", "c1")), rig.thread)
-    assert rig.reports == []
+        rig.graph().invoke(
+            turn(call("lookup_customer", "c1"), call("lookup_customer", "c2")), rig.thread
+        )
+    assert [(c.id, d.kind, a) for c, d, a in rig.reports] == [("c1", "allow", None)]
 
 
 def test_tool_that_handles_its_errors_replies_with_an_error() -> None:

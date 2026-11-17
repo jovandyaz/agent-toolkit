@@ -97,6 +97,10 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
     - Hold a lock on the mandate from reading the ledger until the reserve of an allowed or
       approved charge is recorded after execution: two calls judged against one snapshot can
       both pass and together overspend.
+    - Judge several calls of one turn in order, each against the ledger plus a reserve for
+      every earlier charge of the turn that was allowed or needs approval (the LangGraph
+      adapter does): judged against one snapshot, together they can overspend the budget or
+      raise one link twice.
     - Execute exactly the returned `closed`, not a charge rebuilt from the arguments, and
       reserve `mandates.reserve_amount(closed)` under `closed.charge_ref` (the LangGraph
       adapter hands `closed` to the tool; see `closed_mandate_from_config`).
