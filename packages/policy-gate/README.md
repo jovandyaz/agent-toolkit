@@ -198,6 +198,10 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   once per call), and the application mints a new charge's `charge_ref` server-side from
   `ctx.thread_id` and `ctx.call_id` together (a call id alone can repeat in another thread),
   never from the arguments. A random ref voids every approval (fails closed).
+- For an `amount_increase`, the builder loads the payer, receiving account and rail from the
+  charge the application stored under the `charge_ref` the arguments name; only the amounts come
+  from the arguments. Otherwise an increase that names an allowed payer skips the payer approval
+  its stored charge needs.
 - Execute exactly the returned `closed` (the tool reads it with `closed_mandate_from_config`) and
   reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent: send
   `idempotency_key_from_config(config)` as the provider's idempotency key, so a re-run never issues

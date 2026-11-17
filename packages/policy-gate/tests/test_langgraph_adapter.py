@@ -5,9 +5,10 @@ import hashlib
 import json
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -102,18 +103,46 @@ def mint_ref(ctx: BuildContext) -> str:
     return f"ch_{hashlib.sha256(canonical.encode()).hexdigest()[:32]}"
 
 
-def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
-    """A new charge under `charge_ref`, or an increase of the link the arguments name."""
+@dataclass(frozen=True)
+class StoredCharge:
+    """A charge the application issued, as its own store keeps it."""
+
+    payer: str
+    receiving_account: str = "acct-own"
+    rail: str = "codi_push"
+
+
+STORED: Mapping[str, StoredCharge] = MappingProxyType(
+    {"ch_link": StoredCharge(payer="cust-juan")}  # The pending link the increases raise.
+)
+
+
+def new_charge(
+    args: BaseModel, charge_ref: str, stored: Mapping[str, StoredCharge] = STORED
+) -> ClosedMandate:
+    """A new charge under `charge_ref`, or an increase of the stored link the arguments name.
+
+    An increase loads its payer, receiving account and rail from the stored charge, never from
+    the arguments: `check` binds its previous amount to the ledger, but nothing else binds them.
+    """
     assert isinstance(args, ChargeArgs)
     previous = args.previous_amount_minor
+    if previous is None:
+        ref, payer, account, rail = charge_ref, args.payer, "acct-own", "codi_push"
+    else:
+        ref = args.link_ref or ""
+        link = stored.get(ref)
+        if link is None:
+            raise ValueError("an increase raises a charge the application stored")
+        payer, account, rail = link.payer, link.receiving_account, link.rail
     return ClosedMandate(
         open_mandate_id="om_1",
         agent_id="agent_1",
         kind="new_charge" if previous is None else "amount_increase",
-        charge_ref=args.link_ref or charge_ref,
-        payer=args.payer,
-        receiving_account="acct-own",
-        rail="codi_push",
+        charge_ref=ref,
+        payer=payer,
+        receiving_account=account,
+        rail=rail,
         amount=None if args.amount_minor is None else mxn(args.amount_minor),
         previous_amount=None if previous is None else mxn(previous),
         reference="R-1",
@@ -123,6 +152,11 @@ def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
 def build_charge(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     """The application's builder: it mints the ref from the call, so a re-run rebuilds it."""
     return new_charge(args, mint_ref(ctx))
+
+
+def builder_over(stored: Mapping[str, StoredCharge]) -> Builder:
+    """The application's builder, over another store of issued charges."""
+    return lambda args, ctx: new_charge(args, mint_ref(ctx), stored)
 
 
 def build_with_random_ref(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
@@ -897,10 +931,14 @@ def test_two_increases_of_one_link_in_one_turn() -> None:
 @pytest.mark.parametrize("approved", [True, False])
 def test_a_step_after_a_pending_change_of_its_charge_never_runs(approved: bool) -> None:
     # B only matches the link if A runs; rejecting A must not leave B raising it from 40k.
-    rig = Rig(context=link_reserved(40000))
+    # The link was issued to cust-ana, outside the mandate's payers, so A needs approval.
+    rig = Rig(
+        context=link_reserved(40000),
+        builder=builder_over({"ch_link": StoredCharge(payer="cust-ana")}),
+    )
     graph = rig.graph()
     first = graph.invoke(
-        turn(increase("a", 40000, 50000, payer="cust-ana"), increase("b", 50000, 60000)),
+        turn(increase("a", 40000, 50000), increase("b", 50000, 60000)),
         rig.thread,
     )
     (request,) = pending(first)
@@ -914,6 +952,8 @@ def test_a_step_after_a_pending_change_of_its_charge_never_runs(approved: bool) 
 
 
 def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
+    # The builder loads an increase's charge from the store, which knows c1 only once it ran,
+    # so c2 cannot even be built (`charge_ref_in_turn` backs this up for builders that can).
     rig = Rig()
     created = call("request_payment", "c1", payer="cust-juan", amount_minor=35000)
     raised = call(
@@ -928,7 +968,28 @@ def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
     result = rig.graph().invoke(turn(created, raised), rig.thread)
 
     assert [run["amount_minor"] for run in rig.charge.runs] == [35000]
-    assert replies(result)["c2"].content == "Not executed: charge_ref_in_turn"
+    assert replies(result)["c2"].content == "Not executed: invalid_args:closed:value_error"
+
+
+@pytest.mark.parametrize("named_payer", ["cust-juan", "cust-stranger"])
+def test_an_increase_takes_its_payer_from_the_stored_charge(named_payer: str) -> None:
+    # The link went to a payer outside the mandate, approved by a human. Naming an allowed
+    # payer in the increase's arguments must not skip the approval its real payer needs.
+    rig = Rig(
+        context=link_reserved(10000),
+        builder=builder_over({"ch_link": StoredCharge(payer="cust-stranger")}),
+    )
+    graph = rig.graph()
+
+    (request,) = pending(
+        graph.invoke(turn(increase("c1", 10000, 50000, payer=named_payer)), rig.thread)
+    )
+
+    assert request.reasons == ("mandate:payer_not_allowed",)
+    assert request.closed is not None
+    assert request.closed.payer == "cust-stranger"
+    graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+    assert [closed.payer for closed in rig.charge.closed_seen if closed] == ["cust-stranger"]
 
 
 def test_charges_on_different_refs_in_one_turn_are_judged_normally() -> None:

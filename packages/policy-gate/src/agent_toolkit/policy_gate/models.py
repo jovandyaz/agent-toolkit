@@ -61,6 +61,9 @@ class ToolSpec(BaseModel):
     both); neither ever comes from the arguments. The builder must be deterministic for a given
     (args, ctx) and free of side effects: it may run more than once per call (the LangGraph
     adapter also re-runs `decide` on resume), and an approval binds the charge it showed.
+    For an `amount_increase` it loads the payer, receiving account and rail from the charge the
+    application stored under the `charge_ref` the arguments name; only the amounts come from the
+    arguments (`mandates.check` binds `previous_amount` to the ledger, nothing binds the rest).
     Only a financial tool takes a builder: on any other tool it would never run, which most
     likely means a money tool is missing `financial=True`.
 

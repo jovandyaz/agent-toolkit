@@ -158,6 +158,12 @@ class ClosedMandate(BaseModel):
     `previous_amount`. Fields that come from tool arguments are untrusted: `check` compares
     `agent_id` and `previous_amount` against the mandate and the ledger. The application mints
     a new charge's `charge_ref` server-side; it never takes it from tool arguments.
+
+    For an `amount_increase`, the application loads `payer`, `receiving_account` and `rail` from
+    the charge it stored under `charge_ref`, never from tool arguments; only the amounts come
+    from the arguments. `check` binds `previous_amount` to the ledger, but nothing binds the
+    other fields to the charge as issued: an increase that named an allowed payer would skip
+    the payer approval the stored charge needs.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
