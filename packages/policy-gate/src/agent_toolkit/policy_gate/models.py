@@ -34,14 +34,17 @@ class Effects(BaseModel):
 class BuildContext(BaseModel):
     """What a closed-mandate builder knows about the call besides its arguments.
 
-    `thread_id` is the conversation the call belongs to and `call_id` the model's id for the
-    call. Both come from the runtime, never from tool arguments, and together identify the call:
-    a call id alone can repeat in another thread. Fields may be added; builders read them by name.
+    `thread_id` is the conversation the call belongs to, `message_id` the id of the model's
+    message that proposed it (one per turn) and `call_id` the model's id for the call. All come
+    from the runtime, never from tool arguments, and together identify the call: a call id
+    alone can repeat in another message (some providers number calls `call_0`, `call_1` in
+    every message) or another thread. Fields may be added; builders read them by name.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     thread_id: Identifier
+    message_id: Identifier
     call_id: Identifier
 
 
@@ -57,8 +60,9 @@ class ToolSpec(BaseModel):
     turns the parsed arguments (an `args_model` instance) of one tool call, identified by `ctx`
     (a `BuildContext`), into the concrete charge that `mandates.check` judges. The application
     fills `agent_id` from the session and mints a new charge's `charge_ref` server-side,
-    deterministically from `ctx.thread_id` and `ctx.call_id` together (for example a hash of
-    both); neither ever comes from the arguments. The builder must be deterministic for a given
+    deterministically from `ctx.thread_id`, `ctx.message_id` and `ctx.call_id` together (for
+    example a hash of all three); neither ever comes from the arguments. The builder must be
+    deterministic for a given
     (args, ctx) and free of side effects: it may run more than once per call (the LangGraph
     adapter also re-runs `decide` on resume), and an approval binds the charge it showed.
     For an `amount_increase` it loads the payer, receiving account and rail from the charge the

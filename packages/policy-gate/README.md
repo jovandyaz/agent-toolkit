@@ -57,8 +57,8 @@ class RequestPaymentArgs(BaseModel):
 
 
 def mint_ref(ctx: BuildContext) -> str:
-    """A new charge's ref, minted by the app from the thread and the call, never the arguments."""
-    canonical = json.dumps([ctx.thread_id, ctx.call_id], separators=(",", ":"))
+    """A new charge's ref, minted by the app from the call's ids, never from its arguments."""
+    canonical = json.dumps([ctx.thread_id, ctx.message_id, ctx.call_id], separators=(",", ":"))
     return "chg_" + hashlib.sha256(canonical.encode()).hexdigest()[:32]
 
 
@@ -123,7 +123,7 @@ ok = ToolCall(
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 20_000, "reference": "invoice-42"},
 )
-decision = decide(ok, tool, ctx, thread_id="thread-1")
+decision = decide(ok, tool, ctx, thread_id="thread-1", message_id="msg-1")
 assert isinstance(decision, Allow) and decision.closed is not None  # execute exactly this charge
 
 too_big = ToolCall(
@@ -131,14 +131,16 @@ too_big = ToolCall(
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 90_000, "reference": "invoice-43"},
 )
-assert decide(too_big, tool, ctx, thread_id="thread-1").kind == "require_approval"  # out of range
+too_big_decision = decide(too_big, tool, ctx, thread_id="thread-1", message_id="msg-1")
+assert too_big_decision.kind == "require_approval"  # out of range
 
 foreign = ToolCall(
     id="c3",
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 20_000, "reference": "x", "to": "me"},
 )
-assert decide(foreign, tool, ctx, thread_id="thread-1").kind == "deny"  # unknown arguments
+foreign_decision = decide(foreign, tool, ctx, thread_id="thread-1", message_id="msg-1")
+assert foreign_decision.kind == "deny"  # unknown arguments
 ```
 
 In a LangGraph graph, `GatedToolNode` replaces `ToolNode`. It needs a checkpointer and a thread,
@@ -166,14 +168,15 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
 
 ## Contracts
 
-- `decide(call, tool, ctx, *, thread_id=None) -> Decision` is pure. Rules, in order: tool name, strict argument
+- `decide(call, tool, ctx, *, thread_id=None, message_id=None) -> Decision` is pure. Rules, in order: tool name, strict argument
   validation (unknown keys denied), exceeded run budget, mandate check for `financial` tools,
   `high_risk`, Rule of Two. `Deny` beats `RequireApproval`. Reasons are stable strings such as
   `invalid_args:args.amount_minor:int_type`, `mandate:budget_exceeded`, `no_mandate`; the full
   list is in the `decide` docstring.
 - A `financial` tool must supply `to_closed_mandate(args, ctx)`, where `ctx` is a `BuildContext`
-  with `thread_id` and `call_id`; no other tool may. `decide` takes the thread as
-  `thread_id=...`, required for a financial call under a mandate (ValueError otherwise).
+  with `thread_id`, `message_id` (the id of the model message that proposed the call) and
+  `call_id`; no other tool may. `decide` takes the first two as `thread_id=...` and
+  `message_id=...`, both required for a financial call under a mandate (ValueError otherwise).
 - `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` and `outside_window` follow
   `GateConfig.on_mandate_violation`; every other violation (foreign account, wrong agent or
   currency, expired or revoked mandate, ledger contradictions) is always denied.
@@ -190,14 +193,16 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
 - The LangGraph adapter pauses with one `interrupt` per turn. Its value is plain JSON: a list with
   one `ApprovalRequest.model_dump(mode="json")` per call needing approval, with keys `call_id`,
   `tool`, `args`, `reasons`, `closed` (the charge as it will run, or null), `closed_mandate_hash`
-  and `request_hash`. An approval binds the thread, call, tool, validated arguments, closed
-  mandate and reasons through the `request_hash`; resume with a JSON `ApprovalDecision`.
+  and `request_hash`. An approval binds the thread, message, call, tool, validated arguments,
+  closed mandate and reasons through the `request_hash`; resume with a JSON `ApprovalDecision`.
+- The adapter needs an id on the `AIMessage` that proposes the calls (ValueError otherwise, before
+  anything is decided or run). `add_messages`, as in `MessagesState`, gives every message one.
 - Each call the adapter runs gets, in its config, an idempotency key
   (`idempotency_key_from_config`: the SHA-256 hex of the compact JSON array
-  `[thread_id, call_id]`, the same on every execution of that call) and a fingerprint
-  (`call_fingerprint_from_config`: the SHA-256 hex of its tool, validated arguments and charge
-  hash). The key is unique to the call only while the model provider never repeats a call id
-  within a thread; some emit ids like `call_0` that a later call can reuse.
+  `[thread_id, message_id, call_id]`, the same on every execution of that call) and a
+  fingerprint (`call_fingerprint_from_config`: the SHA-256 hex of its tool, validated arguments
+  and charge hash). Some providers number calls `call_0`, `call_1` in every message; the message
+  id keeps a later message's `call_0` from sharing an earlier one's key.
 - Re-runs. When a tool or `on_decision` raises after some calls of a turn ran, running the thread
   again executes the whole turn again, with LangGraph replaying stored approvals. Without a replay
   hook, a charge under a mandate that already ran and recorded its reserve is then denied
@@ -207,8 +212,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
 - `GatedToolNode(..., replay=hook)`: `hook(key)` returns the `RecordedReply(fingerprint,
   content)` the application stored under that key when the call ran, or None. A call whose stored
   fingerprint matches gets the stored reply and is neither decided, reported nor run again; a call
-  whose key matches with another fingerprint reused another call's id and is denied
-  (`call_id_reused`). The node never runs a call the hook answers.
+  whose key matches with another fingerprint is denied (`call_id_reused`): the hook answered for
+  another call, or the call's builder now gives another charge than when it ran. The node never
+  runs a call the hook answers.
 
 ## Caller duties
 
@@ -220,8 +226,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   the re-run on resume judges every call against the ledger as it is then.
 - The `to_closed_mandate` builder must be deterministic and side-effect free (it runs more than
   once per call), and the application mints a new charge's `charge_ref` server-side from
-  `ctx.thread_id` and `ctx.call_id` together (a call id alone can repeat in another thread),
-  never from the arguments. A random ref voids every approval (fails closed).
+  `ctx.thread_id`, `ctx.message_id` and `ctx.call_id` together (a call id alone can repeat in
+  another message or thread), never from the arguments. A random ref voids every approval (fails
+  closed).
 - For an `amount_increase`, the builder loads the payer, receiving account and rail from the
   charge the application stored under the `charge_ref` the arguments name; only the amounts come
   from the arguments. Otherwise an increase that names an allowed payer skips the payer approval
@@ -234,8 +241,7 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   call_fingerprint_from_config(config), content=reply)` under its idempotency key, in the same
   transaction as the reserve, and the hook returns only what was stored that way. The builder must
   give the same charge after the call ran (never read state the call changes), or the re-run is
-  denied `call_id_reused`. Without a hook, a reused call id reaches the tool with an old call's
-  key: only a provider that rejects a reused key with another payload stops it.
+  denied `call_id_reused`.
 - Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per decided
   call with its final decision, before the call runs, so an audit log that fails blocks the call.
   A re-run without a replay hook reports every call again.

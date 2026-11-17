@@ -77,7 +77,7 @@ def build_charge(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
         open_mandate_id="om_1",
         agent_id="agent_1",
         kind="new_charge",
-        charge_ref=f"ch_{ctx.thread_id}_{ctx.call_id}",
+        charge_ref=f"ch_{ctx.thread_id}_{ctx.message_id}_{ctx.call_id}",
         payer=args.payer,
         receiving_account="acct-own",
         rail="codi_push",
@@ -218,6 +218,7 @@ class App:
             responses=[
                 AIMessage(
                     content="",
+                    id="msg-1",
                     tool_calls=[
                         tool_call(
                             name="request_payment",
@@ -271,7 +272,7 @@ def test_a_re_run_after_a_partial_failure_replays_the_charge_instead_of_repeatin
     assert (app.provider_requests, len(app.issued), len(app.ledger)) == (1, 1, 1)
     replies = {m.tool_call_id: m for m in final["messages"] if isinstance(m, ToolMessage)}
     assert replies["c1"].status == "success"
-    assert replies["c1"].content == "payment request ch_thread-1_c1 sent"
+    assert replies["c1"].content == "payment request ch_thread-1_msg-1_c1 sent"
     assert replies["c2"].content == "cust-juan found"
     assert final["messages"][-1].content == "Payment request sent to Juan."
     events = list(app.audit.iter_all())

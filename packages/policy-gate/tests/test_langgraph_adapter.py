@@ -99,8 +99,8 @@ Builder = Callable[[BaseModel, BuildContext], ClosedMandate]
 
 
 def mint_ref(ctx: BuildContext) -> str:
-    """A new charge's ref, minted server-side from the thread and the call (never the model)."""
-    canonical = json.dumps([ctx.thread_id, ctx.call_id], separators=(",", ":"))
+    """A new charge's ref, minted server-side from the thread, message and call ids."""
+    canonical = json.dumps([ctx.thread_id, ctx.message_id, ctx.call_id], separators=(",", ":"))
     return f"ch_{hashlib.sha256(canonical.encode()).hexdigest()[:32]}"
 
 
@@ -340,7 +340,8 @@ class Rig:
 
     def built(self, args: ChargeArgs, call_id: str) -> ClosedMandate:
         """The charge the application's builder makes for `call_id` in this rig's thread."""
-        return build_charge(args, BuildContext(thread_id=self.thread_id, call_id=call_id))
+        ctx = BuildContext(thread_id=self.thread_id, message_id=MESSAGE_ID, call_id=call_id)
+        return build_charge(args, ctx)
 
     def build_context(self, state: MessagesState) -> GateContext:
         self.contexts_built += 1
@@ -384,8 +385,11 @@ def call(name: str, call_id: str, **args: object) -> LcToolCall:
     return tool_call(name=name, args=args or {"customer_id": f"cust-{call_id}"}, id=call_id)
 
 
-def turn(*calls: LcToolCall) -> dict[str, list[AnyMessage]]:
-    return {"messages": [AIMessage(content="", tool_calls=list(calls))]}
+MESSAGE_ID = "msg_1"  # The id of a turn's AIMessage, unless a test gives another.
+
+
+def turn(*calls: LcToolCall, message_id: str = MESSAGE_ID) -> dict[str, list[AnyMessage]]:
+    return {"messages": [AIMessage(content="", tool_calls=list(calls), id=message_id)]}
 
 
 REQUESTS = TypeAdapter(list[ApprovalRequest])
@@ -745,7 +749,7 @@ def test_builder_minting_a_random_ref_fails_closed() -> None:
     )
 
 
-def test_builder_gets_the_thread_and_call_ids() -> None:
+def test_builder_gets_the_thread_message_and_call_ids() -> None:
     seen: list[BuildContext] = []
 
     def recording(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
@@ -758,7 +762,7 @@ def test_builder_gets_the_thread_and_call_ids() -> None:
     )
 
     assert seen
-    assert set(seen) == {BuildContext(thread_id=rig.thread_id, call_id="c1")}
+    assert set(seen) == {BuildContext(thread_id=rig.thread_id, message_id=MESSAGE_ID, call_id="c1")}
     assert rig.charge.closed_seen == [
         rig.built(ChargeArgs(payer="cust-juan", amount_minor=35000), "c1")
     ]
@@ -795,7 +799,7 @@ def test_tools_receive_the_checked_closed_mandate_via_config() -> None:
     # Whatever the caller put under the key, each tool gets the charge checked for its call.
     rig = Rig()
     graph = rig.graph()
-    in_t1 = BuildContext(thread_id="t1", call_id="forged")
+    in_t1 = BuildContext(thread_id="t1", message_id=MESSAGE_ID, call_id="forged")
     forged = build_charge(ChargeArgs(payer="cust-juan", amount_minor=500000), in_t1)
     config = RunnableConfig(configurable={"thread_id": "t1", CLOSED_MANDATE_KEY: forged})
     calls = turn(
@@ -963,7 +967,7 @@ def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
         payer="cust-juan",
         amount_minor=45000,
         previous_amount_minor=35000,
-        link_ref=mint_ref(BuildContext(thread_id=rig.thread_id, call_id="c1")),  # c1's ref.
+        link_ref=rig.built(ChargeArgs(payer="cust-juan"), "c1").charge_ref,  # c1's ref.
     )
 
     result = rig.graph().invoke(turn(created, raised), rig.thread)
@@ -1076,9 +1080,9 @@ def test_a_lock_around_the_node_covers_one_execution() -> None:
 # Idempotency keys and re-runs after a partial failure.
 
 
-def expected_key(thread_id: str, call_id: str) -> str:
-    """The documented key: SHA-256 hex of the compact JSON array [thread_id, call_id]."""
-    canonical = json.dumps([thread_id, call_id], separators=(",", ":"))
+def expected_key(thread_id: str, call_id: str, message_id: str = MESSAGE_ID) -> str:
+    """The documented key: SHA-256 hex of the compact JSON [thread_id, message_id, call_id]."""
+    canonical = json.dumps([thread_id, message_id, call_id], separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -1091,6 +1095,7 @@ def test_each_call_gets_an_idempotency_key_from_its_thread_and_id() -> None:
 
     assert rig.lookup.keys_seen == [expected_key(rig.thread_id, c) for c in ("c1", "c2")]
     assert expected_key(rig.thread_id, "c1") != expected_key("another-thread", "c1")
+    assert expected_key(rig.thread_id, "c1") != expected_key(rig.thread_id, "c1", "msg_2")
 
 
 def test_idempotency_key_from_config_needs_the_node() -> None:
@@ -1316,29 +1321,21 @@ def test_replay_must_return_a_recorded_reply() -> None:
     assert rig.total_runs() == 0
 
 
-def test_a_call_id_reused_with_the_same_payload_replays() -> None:
-    # Some providers number calls per turn (`call_0`): the same request under the same key is
-    # the same call, as with an HTTP idempotency key, so it gets the stored reply.
-    rig = Rig().replaying()
-    graph = rig.graph()
-    graph.invoke(turn(call("lookup_customer", "call_0")), rig.thread)
-
-    later = graph.invoke(turn(call("lookup_customer", "call_0")), rig.thread)
-
-    assert len(rig.lookup.runs) == 1
-    assert replies(later)["call_0"].content == "lookup_customer ran"
-
-
 @pytest.mark.parametrize(
     ("first", "then"),
     [
         pytest.param(
-            call("lookup_customer", "call_0", customer_id="cust-1"),
-            call("lookup_customer", "call_0", customer_id="cust-2"),
-            id="other_args",
+            call("lookup_customer", "call_0"), call("lookup_customer", "call_0"), id="same_lookup"
         ),
         pytest.param(
-            call("lookup_customer", "call_0"), call("delete_customer", "call_0"), id="other_tool"
+            call("lookup_customer", "call_0", customer_id="cust-1"),
+            call("lookup_customer", "call_0", customer_id="cust-2"),
+            id="other_lookup",
+        ),
+        pytest.param(
+            call("request_payment", "call_0", payer="cust-juan", amount_minor=35000),
+            call("request_payment", "call_0", payer="cust-juan", amount_minor=35000),
+            id="same_charge",
         ),
         pytest.param(
             call("request_payment", "call_0", payer="cust-juan", amount_minor=35000),
@@ -1347,23 +1344,91 @@ def test_a_call_id_reused_with_the_same_payload_replays() -> None:
         ),
     ],
 )
-def test_a_call_id_reused_with_another_payload_is_denied(
+def test_a_later_turn_that_reuses_a_call_id_is_decided_and_runs(
     first: LcToolCall, then: LcToolCall
 ) -> None:
-    # Same key, different request: replaying would report a call that never ran as done.
+    # Some providers number calls per message (`call_0`). A later turn's call is a new call,
+    # even with the same arguments (a second invoice for the same amount): its key and its
+    # charge's ref come from its own message, so it is decided, reported and run, not replayed.
     rig = Rig().replaying()
     graph = rig.graph()
     graph.invoke(turn(first), rig.thread)
     ran_before = rig.total_runs()
     rig.reports.clear()
 
-    later = graph.invoke(turn(then), rig.thread)
+    later = graph.invoke(turn(then, message_id="msg_2"), rig.thread)
 
-    assert "__interrupt__" not in later
-    assert rig.total_runs() == ran_before == 1
-    reply = replies(later)["call_0"]
+    assert (ran_before, rig.total_runs()) == (1, 2)
+    assert replies(later)["call_0"].status == "success"
+    assert [(c.id, d.kind) for c, d, _ in rig.reports] == [("call_0", "allow")]
+
+
+def test_approval_does_not_carry_over_to_a_later_turn() -> None:
+    # The same call id and arguments in a later message of the thread: a new request.
+    rig = Rig()
+    graph = rig.graph()
+    (request,) = pending(graph.invoke(turn(call("delete_customer", "c1")), rig.thread))
+    graph.invoke(Command(resume={"c1": answer(request, approved=False)}), rig.thread)
+    (later,) = pending(
+        graph.invoke(turn(call("delete_customer", "c1"), message_id="msg_2"), rig.thread)
+    )
+    assert later.request_hash != request.request_hash
+
+    resumed = graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+
+    assert rig.delete.runs == []
+    assert replies(resumed)["c1"].content == "Not executed: approval_mismatch, high_risk"
+
+
+def test_a_turn_without_a_message_id_raises() -> None:
+    # A custom state without `add_messages` leaves the AIMessage without an id, and the call
+    # keys need it: fail before building the context, deciding or running anything.
+    rig = Rig()
+    state: MessagesState = {
+        "messages": [AIMessage(content="", tool_calls=[call("lookup_customer", "c1")])]
+    }
+
+    with pytest.raises(ValueError, match="message id"):
+        rig.node()(state, rig.thread)
+    assert (rig.total_runs(), rig.contexts_built, rig.reports) == (0, 0, [])
+
+
+def test_a_record_with_another_fingerprint_is_denied() -> None:
+    # Under the call's own key, but for another request: the hook answered for another call.
+    rig = Rig()
+    rig.replay = lambda key: RecordedReply(fingerprint="0" * 64, content="someone else's reply")
+
+    result = rig.graph().invoke(turn(call("lookup_customer", "c1")), rig.thread)
+
+    assert rig.lookup.runs == []
+    reply = replies(result)["c1"]
     assert (reply.status, reply.content) == ("error", "Not executed: call_id_reused")
-    assert [(c.id, d) for c, d, _ in rig.reports] == [("call_0", Deny(reasons=("call_id_reused",)))]
+    assert [(c.id, d) for c, d, _ in rig.reports] == [("c1", Deny(reasons=("call_id_reused",)))]
+
+
+def test_a_re_run_whose_builder_drifted_is_denied_not_replayed() -> None:
+    # c1 ran; on the re-run its builder gives another charge, so its stored record no longer
+    # matches: neither replayed as that charge nor run again.
+    drifted: list[bool] = []
+
+    def drifting(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
+        closed = build_charge(args, ctx)
+        return closed.model_copy(update={"reference": "R-2"}) if drifted else closed
+
+    rig = Rig(builder=drifting).replaying()
+    fail_once(rig)
+    graph = rig.graph()
+    charge = call("request_payment", "c1", payer="cust-juan", amount_minor=35000)
+    with pytest.raises(RuntimeError, match="provider down"):
+        graph.invoke(turn(charge, call("lookup_customer", "c2")), rig.thread)
+    rig.lookup.fails_with = None
+    drifted.append(True)
+
+    again = graph.invoke(None, rig.thread)
+
+    assert len(rig.charge.runs) == 1
+    assert replies(again)["c1"].status == "error"
+    assert "call_id_reused" in str(replies(again)["c1"].content)
 
 
 # Unknown tools, bad input and configuration.
