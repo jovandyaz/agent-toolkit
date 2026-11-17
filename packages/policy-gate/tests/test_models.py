@@ -27,7 +27,7 @@ class Args(BaseModel):
     customer_id: str
 
 
-def build(args: BaseModel) -> ClosedMandate:
+def build(args: BaseModel, call_id: str) -> ClosedMandate:
     raise AssertionError("never called by these tests")
 
 

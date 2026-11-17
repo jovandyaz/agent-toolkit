@@ -37,9 +37,11 @@ from agent_toolkit.policy_gate import (
     ToolSpec,
 )
 from agent_toolkit.policy_gate.adapters.langgraph import (
+    CLOSED_MANDATE_KEY,
     ApprovalDecision,
     ApprovalRequest,
     GatedToolNode,
+    closed_mandate_from_config,
 )
 
 NOW = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
@@ -70,26 +72,33 @@ class ToolChargeArgs(BaseModel):
     amount_minor: int | None = None
 
 
-@dataclass
-class ChargeBuilder:
-    """The application's builder; `charge_ref` stands for the ref it mints server-side."""
+Builder = Callable[[BaseModel, str], ClosedMandate]
 
-    charge_ref: str = "ch_1"
 
-    def __call__(self, args: BaseModel) -> ClosedMandate:
-        assert isinstance(args, ChargeArgs)
-        return ClosedMandate(
-            open_mandate_id="om_1",
-            agent_id="agent_1",
-            kind="new_charge",
-            charge_ref=self.charge_ref,
-            payer=args.payer,
-            receiving_account="acct-own",
-            rail="codi_push",
-            amount=None if args.amount_minor is None else mxn(args.amount_minor),
-            previous_amount=None,
-            reference="R-1",
-        )
+def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
+    assert isinstance(args, ChargeArgs)
+    return ClosedMandate(
+        open_mandate_id="om_1",
+        agent_id="agent_1",
+        kind="new_charge",
+        charge_ref=charge_ref,
+        payer=args.payer,
+        receiving_account="acct-own",
+        rail="codi_push",
+        amount=None if args.amount_minor is None else mxn(args.amount_minor),
+        previous_amount=None,
+        reference="R-1",
+    )
+
+
+def build_charge(args: BaseModel, call_id: str) -> ClosedMandate:
+    """The application's builder: it mints the ref from the call, so a re-run rebuilds it."""
+    return new_charge(args, f"ch_{call_id}")
+
+
+def build_with_random_ref(args: BaseModel, call_id: str) -> ClosedMandate:
+    """A careless builder: a fresh ref on every call, so the re-run builds another charge."""
+    return new_charge(args, f"ch_{uuid.uuid4().hex}")
 
 
 def mxn(minor: int) -> Amount:
@@ -108,7 +117,7 @@ def plain_spec(name: str, risk: Risk, effects: Effects) -> ToolSpec:
     )
 
 
-def charge_spec(builder: ChargeBuilder) -> ToolSpec:
+def charge_spec(builder: Builder) -> ToolSpec:
     return ToolSpec(
         name="request_payment",
         risk="high",
@@ -126,17 +135,19 @@ DELETE = plain_spec("delete_customer", "high", WRITES)  # Needs approval: high_r
 
 @dataclass
 class FakeTool:
-    """A tool that records the arguments of every run."""
+    """A tool that records the arguments and the gate's closed mandate of every run."""
 
     name: str
     args_schema: type[BaseModel] = CustomerArgs
     runs: list[dict[str, object]] = field(default_factory=list)
+    closed_seen: list[ClosedMandate | None] = field(default_factory=list)
     fails_with: Exception | None = None
     handles_errors: bool = False
 
     def as_tool(self) -> BaseTool:
-        def run(**kwargs: object) -> str:
+        def run(config: RunnableConfig, **kwargs: object) -> str:
             self.runs.append(kwargs)
+            self.closed_seen.append(closed_mandate_from_config(config))
             if self.fails_with is not None:
                 raise self.fails_with
             return f"{self.name} ran"
@@ -206,7 +217,7 @@ class Rig:
     lookup: FakeTool = field(default_factory=lambda: FakeTool("lookup_customer"))
     delete: FakeTool = field(default_factory=lambda: FakeTool("delete_customer"))
     charge: FakeTool = field(default_factory=lambda: FakeTool("request_payment", ToolChargeArgs))
-    builder: ChargeBuilder = field(default_factory=ChargeBuilder)
+    builder: Builder = build_charge
     context: GateContext = field(default_factory=gate_context)
     reports: list[Report] = field(default_factory=list)
     ran_at_report: list[tuple[str, int]] = field(default_factory=list)
@@ -550,24 +561,63 @@ def test_approval_does_not_cover_new_reasons() -> None:
     )
 
 
-def test_financial_approval_binds_the_closed_mandate() -> None:
+def test_deterministic_builder_keeps_the_approval_valid_on_the_re_run() -> None:
     rig = Rig()
     graph = rig.graph()
-    open_amount = call("request_payment", "c1", payer="cust-juan", amount_minor=None)
+    open_amount = call("request_payment", "c1", payer="cust-juan")
     (request,) = pending(graph.invoke(turn(open_amount), rig.thread))
     assert request.reasons == ("mandate:open_amount",)
-    assert (
-        request.closed_mandate_hash
-        == rig.builder(ChargeArgs(payer="cust-juan", amount_minor=None)).content_hash
-    )
+    checked = build_charge(ChargeArgs(payer="cust-juan"), "c1")
+    assert request.closed_mandate_hash == checked.content_hash
 
-    rig.builder.charge_ref = "ch_2"  # A builder that mints another ref on the re-run.
+    graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+
+    assert rig.charge.closed_seen == [checked]
+
+
+def test_builder_minting_a_random_ref_fails_closed() -> None:
+    rig = Rig(builder=build_with_random_ref)
+    graph = rig.graph()
+    open_amount = call("request_payment", "c1", payer="cust-juan")
+    (request,) = pending(graph.invoke(turn(open_amount), rig.thread))
+
     resumed = graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
 
     assert rig.charge.runs == []
     assert replies(resumed)["c1"].content == (
         "Not executed: approval_mismatch, mandate:open_amount"
     )
+
+
+def test_tools_receive_the_checked_closed_mandate_via_config() -> None:
+    # Whatever the caller put under the key, each tool gets the charge checked for its call.
+    rig = Rig()
+    graph = rig.graph()
+    forged = build_charge(ChargeArgs(payer="cust-juan", amount_minor=500000), "forged")
+    config = RunnableConfig(configurable={"thread_id": "t1", CLOSED_MANDATE_KEY: forged})
+    calls = turn(
+        call("request_payment", "c1", payer="cust-juan"),  # Open amount: needs approval.
+        call("request_payment", "c2", payer="cust-juan", amount_minor=35000),  # Allowed.
+        call("lookup_customer", "c3"),
+    )
+    (request,) = pending(graph.invoke(calls, config))
+
+    graph.invoke(Command(resume={"c1": answer(request)}), config)
+
+    checked = {c.id: d.closed for c, d, _ in rig.reports if not isinstance(d, Deny)}
+    assert checked["c1"] == build_charge(ChargeArgs(payer="cust-juan"), "c1")
+    assert checked["c1"].content_hash == request.closed_mandate_hash
+    assert checked["c2"] == build_charge(ChargeArgs(payer="cust-juan", amount_minor=35000), "c2")
+    assert rig.charge.closed_seen == [checked["c1"], checked["c2"]]
+    assert rig.lookup.closed_seen == [None]
+
+
+def test_closed_mandate_from_config_accepts_only_a_closed_mandate() -> None:
+    assert closed_mandate_from_config(RunnableConfig()) is None
+    with pytest.raises(TypeError, match="ClosedMandate"):
+        closed_mandate_from_config(
+            RunnableConfig(configurable={CLOSED_MANDATE_KEY: {"charge_ref": "ch_x"}})
+        )
 
 
 def test_approved_financial_call_runs_with_the_validated_args() -> None:

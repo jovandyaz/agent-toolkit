@@ -39,12 +39,15 @@ class ToolSpec(BaseModel):
     it JSON-shaped fields (str, int, bool, None, list, dict, Literal, nested models): strict
     validation rejects a string for a date, Decimal or Enum field and a list for a tuple.
 
-    A `financial` tool issues payment requests, so it needs `to_closed_mandate`: it turns the
-    parsed arguments (an `args_model` instance) into the concrete charge that `mandates.check`
-    judges. The application fills `agent_id` from the session and mints a new charge's
-    `charge_ref` server-side; neither comes from the arguments. Only a financial tool takes a
-    builder: on any other tool it would never run, which most likely means a money tool is
-    missing `financial=True`.
+    A `financial` tool issues payment requests, so it needs `to_closed_mandate(args, call_id)`:
+    it turns the parsed arguments (an `args_model` instance) of the tool call `call_id` into the
+    concrete charge that `mandates.check` judges. The application fills `agent_id` from the
+    session and mints a new charge's `charge_ref` server-side, for example from a hash of the
+    thread id and `call_id`; neither ever comes from the arguments. The builder must be
+    deterministic for a given (args, call_id): the gate may judge one call more than once (the
+    LangGraph adapter re-runs `decide` on resume), and an approval binds the charge it showed.
+    Only a financial tool takes a builder: on any other tool it would never run, which most
+    likely means a money tool is missing `financial=True`.
 
     The spec is trusted configuration. The gate cannot tell that a tool moves money: one
     declared `financial=False` skips the mandate entirely and is judged only by its risk,
@@ -59,7 +62,7 @@ class ToolSpec(BaseModel):
     reversible: bool
     financial: bool
     args_model: type[BaseModel]
-    to_closed_mandate: Callable[[BaseModel], ClosedMandate] | None
+    to_closed_mandate: Callable[[BaseModel, str], ClosedMandate] | None
 
     @model_validator(mode="after")
     def _check(self) -> Self:

@@ -56,8 +56,8 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
        depth whatever the model's own config: deny `invalid_args:…`.
     3. An exceeded run budget: deny `budget_exceeded:<kind>`.
     4. A financial tool without a mandate needs approval (`no_mandate`). With one, it builds
-       the charge with `tool.to_closed_mandate`; a `ValueError` (pydantic's `ValidationError`
-       included) denies `invalid_args:closed…`. A charge for another agent than
+       the charge with `tool.to_closed_mandate(args, call.id)`; a `ValueError` (pydantic's
+       `ValidationError` included) denies `invalid_args:closed…`. A charge for another agent than
        `ctx.session.agent_id` denies `agent_mismatch`, and a mandate of another principal than
        `ctx.session.principal_id` denies `principal_mismatch`. From `ctx.ledger` it computes
        the budget consumed this period and the state of the charge's own `charge_ref`; a
@@ -98,7 +98,8 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
       approved charge is recorded after execution: two calls judged against one snapshot can
       both pass and together overspend.
     - Execute exactly the returned `closed`, not a charge rebuilt from the arguments, and
-      reserve `mandates.reserve_amount(closed)` under `closed.charge_ref`.
+      reserve `mandates.reserve_amount(closed)` under `closed.charge_ref` (the LangGraph
+      adapter hands `closed` to the tool; see `closed_mandate_from_config`).
 
     Raises ValueError, before any rule, when a financial tool runs under a mandate and
     `ctx.ledger` is None: treating it as empty would overspend. Exceptions other than
@@ -116,7 +117,7 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
 
     charge = _Charge(closed=None, approvals=(), verified=False)
     if tool.financial:
-        judged = _judge_charge(args, tool, ctx, inputs)
+        judged = _judge_charge(args, call.id, tool, ctx, inputs)
         if isinstance(judged, Deny):
             return judged
         charge = judged
@@ -152,7 +153,11 @@ def _parse_args(call: ToolCall, tool: ToolSpec) -> BaseModel | Deny:
 
 
 def _judge_charge(
-    args: BaseModel, tool: ToolSpec, ctx: GateContext, inputs: _MandateInputs | None
+    args: BaseModel,
+    call_id: str,
+    tool: ToolSpec,
+    ctx: GateContext,
+    inputs: _MandateInputs | None,
 ) -> _Charge | Deny:
     if inputs is None:
         return _Charge(closed=None, approvals=("no_mandate",), verified=False)
@@ -160,7 +165,7 @@ def _judge_charge(
     if build is None:  # ToolSpec validation forbids it; model_construct can bypass that.
         raise ValueError(f"financial tool {tool.name!r} has no to_closed_mandate")
     try:
-        closed = build(args)
+        closed = build(args, call_id)
     except ValueError as error:
         return Deny(reasons=_invalid_args("closed", error))
     if closed.agent_id != ctx.session.agent_id:

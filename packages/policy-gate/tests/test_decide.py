@@ -33,7 +33,15 @@ from agent_toolkit.policy_gate import (
 
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
 NOW = datetime(2026, 12, 1, 12, 0, tzinfo=MEXICO_CITY)
-MINTED_REF = "ch_new"  # The ref the application mints server-side for a new charge.
+CALL_ID = "call_1"
+
+
+def mint_ref(call_id: str) -> str:
+    """The application mints a new charge's ref server-side, deterministically from the call."""
+    return f"ch_{call_id}"
+
+
+MINTED_REF = mint_ref(CALL_ID)
 
 
 def mxn(minor: int) -> Amount:
@@ -113,7 +121,7 @@ class AllowingArgs(BaseModel):
     customer_id: str
 
 
-def build_charge(args: BaseModel) -> ClosedMandate:
+def build_charge(args: BaseModel, call_id: str) -> ClosedMandate:
     """The application's builder: it binds the mandate and agent, and mints a new charge's ref.
 
     An increase names the link it raises; the gate reads that ref's reserve from the ledger.
@@ -126,7 +134,7 @@ def build_charge(args: BaseModel) -> ClosedMandate:
         open_mandate_id="om_1",
         agent_id="agent_1",
         kind="new_charge" if previous is None else "amount_increase",
-        charge_ref=args.link_ref or MINTED_REF,
+        charge_ref=args.link_ref or mint_ref(call_id),
         payer=args.payer,
         receiving_account=args.receiving_account,
         rail=args.rail,
@@ -142,11 +150,11 @@ def build_charge(args: BaseModel) -> ClosedMandate:
     )
 
 
-def build_leaky_charge(args: BaseModel) -> ClosedMandate:
+def build_leaky_charge(args: BaseModel, call_id: str) -> ClosedMandate:
     """Copies the model's `agent_id` into the charge: exactly what the gate must not trust."""
     assert isinstance(args, LeakyChargeArgs)
     return ClosedMandate.model_validate(
-        build_charge(args).model_dump() | {"agent_id": args.agent_id}
+        build_charge(args, call_id).model_dump() | {"agent_id": args.agent_id}
     )
 
 
@@ -158,7 +166,7 @@ NOTIFIES = Effects(reads_sensitive=False, changes_state=False, external_comm=Tru
 
 def financial_tool(
     args_model: type[BaseModel] = ChargeArgs,
-    builder: Callable[[BaseModel], ClosedMandate] = build_charge,
+    builder: Callable[[BaseModel, str], ClosedMandate] = build_charge,
 ) -> ToolSpec:
     return ToolSpec(
         name="request_payment",
@@ -208,7 +216,7 @@ CUSTOMER_ARGS: dict[str, object] = {"customer_id": "cust-juan"}
 
 
 def charge_call(**overrides: object) -> ToolCall:
-    return ToolCall(id="call_1", name="request_payment", args=CHARGE_ARGS | overrides)
+    return ToolCall(id=CALL_ID, name="request_payment", args=CHARGE_ARGS | overrides)
 
 
 def customer_call(name: str, **overrides: object) -> ToolCall:
@@ -549,7 +557,7 @@ def test_violation_follows_config() -> None:
     assert approve == RequireApproval(
         reasons=("mandate:amount_out_of_range",),
         args=charge_args(amount_minor=600000),
-        closed=build_charge(charge_args(amount_minor=600000)),
+        closed=build_charge(charge_args(amount_minor=600000), CALL_ID),
     )
     assert deny == Deny(reasons=("mandate:amount_out_of_range",))
 
@@ -587,7 +595,7 @@ def test_open_amount_qr_requires_approval() -> None:
     assert decision == RequireApproval(
         reasons=("mandate:open_amount",),
         args=charge_args(amount_minor=None),
-        closed=build_charge(charge_args(amount_minor=None)),
+        closed=build_charge(charge_args(amount_minor=None), CALL_ID),
     )
 
 
@@ -700,8 +708,24 @@ def test_closed_mandate_that_does_not_validate_is_denied() -> None:
     assert negative == Deny(reasons=("invalid_args:closed.minor:greater_than_equal",))
 
 
+def test_builder_gets_the_parsed_args_and_the_call_id() -> None:
+    # The call id lets the application mint a ref that a re-run of the gate rebuilds the same.
+    seen: list[tuple[BaseModel, str]] = []
+
+    def recording(args: BaseModel, call_id: str) -> ClosedMandate:
+        seen.append((args, call_id))
+        return build_charge(args, call_id)
+
+    decision = decide(charge_call(), financial_tool(builder=recording), context())
+
+    assert seen == [(charge_args(), CALL_ID)]
+    assert isinstance(decision, Allow)
+    assert decision.closed is not None
+    assert decision.closed.charge_ref == mint_ref(CALL_ID)
+
+
 def test_builder_value_error_is_denied_without_its_message() -> None:
-    def refuse(args: BaseModel) -> ClosedMandate:
+    def refuse(args: BaseModel, call_id: str) -> ClosedMandate:
         raise ValueError("payer cust-juan has no consent on file")
 
     decision = decide(charge_call(), financial_tool(builder=refuse), context())
@@ -710,7 +734,7 @@ def test_builder_value_error_is_denied_without_its_message() -> None:
 
 
 def test_builder_programming_errors_propagate() -> None:
-    def broken(args: BaseModel) -> ClosedMandate:
+    def broken(args: BaseModel, call_id: str) -> ClosedMandate:
         raise KeyError("bug in the application's builder")
 
     with pytest.raises(KeyError):

@@ -13,13 +13,18 @@ node never looks further back, so re-entering it cannot run a turn twice), and:
 3. On resume LangGraph re-runs the node from its start, so steps 1 and 2 repeat with a fresh
    context and `interrupt` returns the resume value, a `dict[call_id, ApprovalDecision]`. An
    approval counts only if its `request_hash` equals the one recomputed now, which binds the
-   call id, tool, validated arguments, reasons and closed mandate. A resume value that is not
+   call id, tool, validated arguments, closed mandate and reasons: an approval covers neither
+   other arguments or another charge, nor a reason that appeared after it was given (for
+   example `mandate:budget_exceeded` once the ledger moved). A resume value that is not
    such a mapping rejects every pending call (`approval_invalid`); a missing, mismatched or
    refused approval rejects its own call (`approval_missing`, `approval_mismatch`,
    `approval_rejected`).
 4. Runs the allowed and approved calls one at a time, in order, with their validated
-   arguments (`args.model_dump(mode="json")`, exactly what the approval showed). Every other
-   call gets `ToolMessage(status="error", content="Not executed: <reasons>")`.
+   arguments (`args.model_dump(mode="json")`, exactly what the approval showed) and the
+   checked `ClosedMandate` (None if the call has none) in `configurable[CLOSED_MANDATE_KEY]`
+   of the tool's config; a financial tool reads it with `closed_mandate_from_config` and
+   issues exactly that charge. Every other call gets
+   `ToolMessage(status="error", content="Not executed: <reasons>")`.
 5. Calls `on_decision(call, decision, approval)` once per call with its final outcome: `Allow`,
    or `RequireApproval` with the approval that let it run, once the tool ran; or `Deny` for a
    call that does not run, before any tool runs. A rejection's reasons are its `approval_*`
@@ -41,9 +46,12 @@ Duties of the application:
   lock from the first decision, across the interrupt, until the charge's reserve is recorded;
   without it the re-run re-verifies against whatever changed, and a call can end denied or
   gain reasons that void its approval.
-- `ToolSpec.to_closed_mandate` must build the same charge on the re-run: the approval binds its
-  `content_hash`, so a builder that mints a random `charge_ref` per call voids every approval
-  of a financial call. Derive the ref from stable data.
+- `ToolSpec.to_closed_mandate(args, call_id)` must be deterministic: the approval binds the
+  charge's `content_hash`, so a builder that mints a random `charge_ref` per call voids every
+  approval of a financial call (it fails closed). Mint the ref server-side from the call, for
+  example a hash of the thread id and `call_id`, never from tool arguments.
+- A financial tool issues the charge from `closed_mandate_from_config(config)`, not one
+  rebuilt from its arguments, and the reserve is recorded under its `charge_ref`.
 - A node is LangGraph's unit of retry. A tool or `on_decision` error after some calls ran fails
   the node, and running the thread again re-runs every call of the turn. Give this node no
   `RetryPolicy` and make tools that move money idempotent (keyed by `charge_ref`).
@@ -68,10 +76,12 @@ from typing import Annotated
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import patch_config
 from langchain_core.tools import BaseTool
 from langgraph.types import interrupt
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from agent_toolkit.mandates import ClosedMandate
 from agent_toolkit.policy_gate.decide import decide
 from agent_toolkit.policy_gate.models import (
     Allow,
@@ -83,9 +93,32 @@ from agent_toolkit.policy_gate.models import (
     ToolSpec,
 )
 
-__all__ = ["ApprovalDecision", "ApprovalRequest", "GatedToolNode"]
+__all__ = [
+    "CLOSED_MANDATE_KEY",
+    "ApprovalDecision",
+    "ApprovalRequest",
+    "GatedToolNode",
+    "closed_mandate_from_config",
+]
+
+CLOSED_MANDATE_KEY = "agent_toolkit_closed_mandate"
+"""Key in `configurable` of the config a tool runs with: the gate's checked `ClosedMandate`."""
 
 Identifier = Annotated[str, Field(min_length=1)]
+
+
+def closed_mandate_from_config(config: RunnableConfig) -> ClosedMandate | None:
+    """The charge the gate checked (and a human approved, if needed) for the running call.
+
+    A financial tool declares a `config: RunnableConfig` parameter and issues exactly this
+    charge, with its `charge_ref` and amount; it never rebuilds one from its arguments. None
+    for a call without a closed mandate (not financial, or financial without a mandate).
+    Raises TypeError if the key holds anything but a `ClosedMandate`.
+    """
+    closed = config.get("configurable", {}).get(CLOSED_MANDATE_KEY)
+    if closed is not None and not isinstance(closed, ClosedMandate):
+        raise TypeError(f"{CLOSED_MANDATE_KEY} holds {type(closed).__name__}, not a ClosedMandate")
+    return closed
 
 
 class ApprovalRequest(BaseModel):
@@ -93,8 +126,8 @@ class ApprovalRequest(BaseModel):
 
     `args` are the validated arguments the call will run with; `closed_mandate_hash` is the
     `content_hash` of the charge a financial call will issue. `request_hash` is the SHA-256 hex
-    of the canonical JSON (sorted keys, no spaces) of every other field; an `ApprovalDecision`
-    echoes it.
+    of the canonical JSON (sorted keys, no spaces) of every other field, `reasons` included, so
+    an approval never covers a reason it did not show; an `ApprovalDecision` echoes it.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
@@ -201,7 +234,9 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig
     ) -> ToolMessage:
         validated = tool_call(name=call.name, args=_json_args(decision), id=call.id)
-        output = self._tools[call.name].invoke(validated, config)
+        # Always set, None included, so a value the caller put under the key never reaches a tool.
+        checked = patch_config(config, configurable={CLOSED_MANDATE_KEY: decision.closed})
+        output = self._tools[call.name].invoke(validated, checked)
         if not isinstance(output, ToolMessage):
             raise TypeError(
                 f"tool {call.name!r} returned {type(output).__name__}, not content or a ToolMessage"
