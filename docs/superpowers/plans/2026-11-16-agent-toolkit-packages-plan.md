@@ -212,11 +212,11 @@ def test_money_add_requires_same_currency():
   - `decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision`
 - Reglas, en orden (la primera que aplica decide `Deny`; las de aprobación se acumulan):
   1. `call.name != tool.name` → `Deny("tool_mismatch")`.
-  2. Args inválidos según `args_model` → `Deny("invalid_args:<loc>:<type>")`, una razón por error (`loc` = `args.<ruta>`, o `closed.<ruta>` si falla el cierre del mandato; sin mensajes, que pueden traer PII).
+  2. Args inválidos según `args_model` → `Deny("invalid_args:<loc>:<type>")`, una razón por error distinto (`loc` = `args.<ruta>`, o `closed.<ruta>` si falla el cierre del mandato; sin mensajes, que pueden traer PII). R25: cada segmento de `loc` se limita a `[A-Za-z0-9_]` (lo demás pasa a `_`) y 64 caracteres; `extra_forbidden` omite la clave desconocida (`invalid_args:args:extra_forbidden`).
   3. `budgets.check` no vacío → `Deny("budget_exceeded:<kind>")`.
   4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `closed = tool.to_closed_mandate(args)`; un `ValueError`/`ValidationError` → `Deny("invalid_args:closed…")`; `closed.agent_id != session.agent_id` → `Deny("agent_mismatch")`; `mandate.principal_id != session.principal_id` → `Deny("principal_mismatch")` (R23); un `ValueError` del ledger → `Deny("ledger_inconsistent")` (R22); los tres antes de `check` y no configurables. Violaciones `account_not_allowed`, `mandate_mismatch`, `agent_mismatch`, `currency_mismatch`, `expired`, `revoked`, `previous_amount_mismatch` o `charge_ref_reused` (y cualquiera nueva) → `Deny("mandate:<v>")` siempre (no configurable). `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` y `outside_window` → según `config`. `approval_reasons` → `RequireApproval("mandate:<r>")`.
   5. No financiero con `risk="high"` → `RequireApproval("high_risk")`.
-  6. Sesión con las tres banderas Rule of Two y `effects.changes_state`, salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
+  6. Sesión con las tres banderas Rule of Two y `effects.changes_state` o `effects.external_comm` (R24: la [C] de Meta es "cambiar estado o comunicarse hacia afuera"), salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
   7. Si no → `Allow`.
 
 - [x] **Step 1: Tests** (una por regla, más):

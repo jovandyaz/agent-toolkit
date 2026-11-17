@@ -45,6 +45,10 @@ class ToolSpec(BaseModel):
     `charge_ref` server-side; neither comes from the arguments. Only a financial tool takes a
     builder: on any other tool it would never run, which most likely means a money tool is
     missing `financial=True`.
+
+    The spec is trusted configuration. The gate cannot tell that a tool moves money: one
+    declared `financial=False` skips the mandate entirely and is judged only by its risk,
+    effects and the session.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
@@ -70,7 +74,8 @@ class SessionProfile(BaseModel):
     """Who acts, for whom, and the session's Rule of Two flags (Meta, Agents Rule of Two).
 
     A session with untrusted input, access to sensitive data and the power to change state
-    holds all three; then every state change needs a verified mandate or a human.
+    or communicate externally (`state_change`) holds all three; then every tool that changes
+    state or communicates externally needs a verified mandate or a human.
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")

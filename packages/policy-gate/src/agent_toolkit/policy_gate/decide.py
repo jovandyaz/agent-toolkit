@@ -1,5 +1,6 @@
 """The gate's decision for one tool call: a pure function of the call, the tool and the context."""
 
+import re
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ValidationError
@@ -24,6 +25,11 @@ from agent_toolkit.policy_gate.models import (
 _OVERRIDABLE: frozenset[Violation] = frozenset(
     {"rail_not_allowed", "amount_out_of_range", "budget_exceeded", "outside_window"}
 )
+
+
+# Reasons reach the model and the audit log, and a location can hold model-chosen keys.
+_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9_]")
+_MAX_SEGMENT = 64
 
 
 @dataclass(frozen=True)
@@ -61,16 +67,20 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
        `ctx.config`. Its approval reasons need approval.
     5. A non-financial `high` risk tool needs approval (`high_risk`).
     6. A session holding all three Rule of Two flags needs approval for a tool that changes
-       state (`rule_of_two`), unless it is a financial call its mandate fully verified.
+       state or communicates externally (`rule_of_two`), unless it is a financial call its
+       mandate fully verified.
     7. Otherwise allow.
 
     Reasons are stable, machine-readable strings, `<code>` or `<code>:<detail>`:
 
     - `tool_mismatch`: the call names another tool than the spec it was routed to.
-    - `invalid_args:<loc>:<type>`: one per validation error, with pydantic's error `type`.
-      `<loc>` is `args` plus the dotted path inside the arguments (`args.amount_minor`), or
-      `closed` plus the path inside the model that rejected the charge built from them
-      (`closed`, `closed.minor`). Error messages are left out: they may echo PII.
+    - `invalid_args:<loc>:<type>`: one per distinct validation error, with pydantic's error
+      `type`. `<loc>` is `args` plus the dotted path inside the arguments (`args.amount_minor`),
+      or `closed` plus the path inside the model that rejected the charge built from them
+      (`closed`, `closed.minor`). Each path segment keeps only `[A-Za-z0-9_]` (others become
+      `_`) and at most 64 characters. An unknown key is left out: `extra_forbidden` names the
+      object that holds it (`invalid_args:args:extra_forbidden`). Error messages are left
+      out: they may echo PII.
     - `budget_exceeded:<kind>`: one per exceeded run limit (`budgets.ExceededKind`).
     - `agent_mismatch`: the charge names another agent than the session's.
     - `principal_mismatch`: the mandate belongs to another principal than the session's.
@@ -113,7 +123,8 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
     approvals = list(charge.approvals)
     if not tool.financial and tool.risk == "high":
         approvals.append("high_risk")
-    if _holds_rule_of_two(ctx.session) and tool.effects.changes_state and not charge.verified:
+    acts_outward = tool.effects.changes_state or tool.effects.external_comm
+    if _holds_rule_of_two(ctx.session) and acts_outward and not charge.verified:
         approvals.append("rule_of_two")
 
     if approvals:
@@ -178,10 +189,18 @@ def _judge_charge(
 def _invalid_args(origin: str, error: ValueError) -> tuple[str, ...]:
     if not isinstance(error, ValidationError):
         return (f"invalid_args:{origin}:value_error",)
-    return tuple(
-        f"invalid_args:{'.'.join([origin, *map(str, detail['loc'])])}:{detail['type']}"
-        for detail in error.errors(include_url=False, include_context=False, include_input=False)
-    )
+    reasons: dict[str, None] = {}
+    for detail in error.errors(include_url=False, include_context=False, include_input=False):
+        loc = detail["loc"]
+        if detail["type"] == "extra_forbidden":
+            loc = loc[:-1]  # The unknown key itself is model-chosen text.
+        path = ".".join([origin, *map(_safe_segment, loc)])
+        reasons[f"invalid_args:{path}:{detail['type']}"] = None
+    return tuple(reasons)
+
+
+def _safe_segment(segment: str | int) -> str:
+    return _UNSAFE_CHARS.sub("_", str(segment))[:_MAX_SEGMENT] or "_"
 
 
 def _holds_rule_of_two(session: SessionProfile) -> bool:

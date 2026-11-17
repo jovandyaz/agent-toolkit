@@ -79,6 +79,15 @@ class CustomerArgs(BaseModel):
     customer_id: str
 
 
+class ScoredArgs(BaseModel):
+    """Takes a mapping whose keys the model chooses."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    customer_id: str
+    scores: dict[str, int] | None = None
+
+
 class Note(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
 
@@ -144,6 +153,7 @@ def build_leaky_charge(args: BaseModel) -> ClosedMandate:
 SPENDS = Effects(reads_sensitive=False, changes_state=True, external_comm=True)
 READS = Effects(reads_sensitive=True, changes_state=False, external_comm=False)
 WRITES = Effects(reads_sensitive=False, changes_state=True, external_comm=False)
+NOTIFIES = Effects(reads_sensitive=False, changes_state=False, external_comm=True)
 
 
 def financial_tool(
@@ -184,6 +194,7 @@ CHARGE = financial_tool()
 LOOKUP = plain_tool("lookup_customer", "low", READS)
 TAG = plain_tool("tag_customer", "medium", WRITES)
 DELETE = plain_tool("delete_customer", "high", WRITES)
+EMAIL = plain_tool("email_customer", "low", NOTIFIES)
 
 CHARGE_ARGS: dict[str, object] = {
     "payer": "cust-juan",
@@ -364,7 +375,37 @@ def test_every_invalid_arg_is_a_reason() -> None:
 def test_unknown_arg_key_is_denied() -> None:
     decision = decide(charge_call(agent_id="agent_2"), CHARGE, context())
 
-    assert decision == Deny(reasons=("invalid_args:args.agent_id:extra_forbidden",))
+    assert decision == Deny(reasons=("invalid_args:args:extra_forbidden",))
+
+
+HOSTILE_KEYS = [
+    pytest.param("evil\nkey", "evil_key", id="newline"),
+    pytest.param("a:b", "a_b", id="colon"),
+    pytest.param("k" * 1000, "k" * 64, id="long"),
+]
+
+
+@pytest.mark.parametrize(("key", "segment"), HOSTILE_KEYS)
+def test_unknown_key_stays_out_of_the_reason(key: str, segment: str) -> None:
+    # Reasons reach the model and the audit log; an unknown key is model-chosen text.
+    decision = decide(customer_call("tag_customer", **{key: 1}), TAG, context())
+
+    assert decision == Deny(reasons=("invalid_args:args:extra_forbidden",))
+
+
+@pytest.mark.parametrize(("key", "segment"), HOSTILE_KEYS)
+def test_model_chosen_keys_in_a_location_are_sanitized(key: str, segment: str) -> None:
+    tool = plain_tool("score_customer", "low", WRITES, ScoredArgs)
+
+    decision = decide(customer_call("score_customer", scores={key: "high"}), tool, context())
+
+    assert decision == Deny(reasons=(f"invalid_args:args.scores.{segment}:int_type",))
+
+
+def test_several_unknown_keys_give_one_reason() -> None:
+    decision = decide(customer_call("tag_customer", a=1, b=2), TAG, context())
+
+    assert decision == Deny(reasons=("invalid_args:args:extra_forbidden",))
 
 
 @pytest.mark.parametrize("args_model", [IgnoringArgs, AllowingArgs])
@@ -375,7 +416,7 @@ def test_unknown_arg_key_is_denied_even_if_the_model_accepts_it(
 
     decision = decide(customer_call("tag_customer", agent_id="agent_2"), tool, context())
 
-    assert decision == Deny(reasons=("invalid_args:args.agent_id:extra_forbidden",))
+    assert decision == Deny(reasons=("invalid_args:args:extra_forbidden",))
 
 
 def test_lax_models_are_validated_strictly_at_every_depth() -> None:
@@ -391,7 +432,7 @@ def test_lax_models_are_validated_strictly_at_every_depth() -> None:
 
     assert coerced == Deny(reasons=("invalid_args:args.priority:int_type",))
     assert nested_coerced == Deny(reasons=("invalid_args:args.note.weight:int_type",))
-    assert nested_unknown == Deny(reasons=("invalid_args:args.note.payer:extra_forbidden",))
+    assert nested_unknown == Deny(reasons=("invalid_args:args.note:extra_forbidden",))
 
 
 def test_args_are_checked_before_the_budget() -> None:
@@ -641,6 +682,15 @@ def test_tool_args_cannot_change_the_acting_agent() -> None:
     assert isinstance(own_agent, Allow)
 
 
+def test_agent_mismatch_is_reported_before_principal_mismatch() -> None:
+    leaky = financial_tool(LeakyChargeArgs, build_leaky_charge)
+    other_principal = context(session=session(principal_id="owner_2"))
+
+    decision = decide(charge_call(agent_id="agent_2"), leaky, other_principal)
+
+    assert decision == Deny(reasons=("agent_mismatch",))
+
+
 def test_closed_mandate_that_does_not_validate_is_denied() -> None:
     # Amount allows 0 and rejects negatives; a charge needs a positive amount.
     zero = decide(charge_call(amount_minor=0), CHARGE, context())
@@ -720,7 +770,16 @@ def test_rule_of_two_needs_all_three_flags(lowered: str) -> None:
     assert decision == Allow(args=customer_args(), closed=None)
 
 
-def test_rule_of_two_leaves_calls_without_state_change_alone() -> None:
+def test_rule_of_two_gates_external_communication() -> None:
+    # Meta's third property is changing state OR communicating externally: the exfiltration path.
+    risky = decide(customer_call("email_customer"), EMAIL, context(session=session(**RULE_OF_TWO)))
+    calm = decide(customer_call("email_customer"), EMAIL, context())
+
+    assert risky == RequireApproval(reasons=("rule_of_two",), args=customer_args(), closed=None)
+    assert calm == Allow(args=customer_args(), closed=None)
+
+
+def test_rule_of_two_leaves_reads_alone() -> None:
     decision = decide(
         customer_call("lookup_customer"), LOOKUP, context(session=session(**RULE_OF_TWO))
     )
