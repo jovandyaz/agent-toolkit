@@ -44,8 +44,9 @@ class ToolSpec(BaseModel):
     concrete charge that `mandates.check` judges. The application fills `agent_id` from the
     session and mints a new charge's `charge_ref` server-side, for example from a hash of the
     thread id and `call_id`; neither ever comes from the arguments. The builder must be
-    deterministic for a given (args, call_id): the gate may judge one call more than once (the
-    LangGraph adapter re-runs `decide` on resume), and an approval binds the charge it showed.
+    deterministic for a given (args, call_id) and free of side effects: it may run more than
+    once per call (the LangGraph adapter also re-runs `decide` on resume), and an approval
+    binds the charge it showed.
     Only a financial tool takes a builder: on any other tool it would never run, which most
     likely means a money tool is missing `financial=True`.
 

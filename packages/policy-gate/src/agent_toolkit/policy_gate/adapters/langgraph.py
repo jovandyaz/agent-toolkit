@@ -9,8 +9,11 @@ node never looks further back, so re-entering it cannot run a turn twice), and:
 1. Builds the context with `context(state)` and decides every call with `decide`, in order,
    before running any. Each call is judged against the ledger plus a reserve
    (`mandates.reserve_amount(closed)`, dated `ctx.now`) for every earlier charge of the turn
-   that was allowed or needs approval, so one turn can neither overspend the mandate's budget
-   nor raise one link twice from the same starting amount. The working ledger is pure and
+   that was allowed or needs approval, so one turn cannot overspend the mandate's budget (a
+   later rejection only frees budget). A call on the `charge_ref` of an earlier call of the
+   turn that was not denied is denied (`charge_ref_in_turn`, not configurable): its check would
+   rest on a reserve that rejecting the earlier call undoes, so multi-step changes to one
+   charge (create then raise, raise twice) must span turns. All of this is pure and
    deterministic, so the re-run on resume rebuilds the same decisions and hashes. A call to a
    tool missing from `tools` or `specs` is denied (`unknown_tool`).
 2. If calls need approval, pauses the graph with one `interrupt` whose value is the list of
@@ -58,9 +61,11 @@ Duties of the application:
   lock from the first decision, across the interrupt, until the charge's reserve is recorded;
   without it the re-run re-verifies against whatever changed, and a call can end denied or
   gain reasons that void its approval.
-- `ToolSpec.to_closed_mandate(args, call_id)` must be deterministic: the approval binds the
-  charge's `content_hash`, so a builder that mints a random `charge_ref` per call voids every
-  approval of a financial call (it fails closed). Mint the ref server-side from the call, for
+- `ToolSpec.to_closed_mandate(args, call_id)` must be deterministic and free of side effects:
+  the node calls it more than once per call (to find the call's `charge_ref`, inside `decide`,
+  and again on the re-run), and the approval binds the charge's `content_hash`, so a builder
+  that mints a random `charge_ref` per call voids every approval of a financial call (it fails
+  closed). Mint the ref server-side from the call, for
   example a hash of the thread id and `call_id`, never from tool arguments.
 - A financial tool issues the charge from `closed_mandate_from_config(config)`, not one
   rebuilt from its arguments, and the reserve is recorded under its `charge_ref`.
@@ -177,6 +182,7 @@ class ApprovalDecision(BaseModel):
 
 
 _ANSWERS = TypeAdapter(dict[str, ApprovalDecision])
+_SAME_CHARGE_IN_TURN = Deny(reasons=("charge_ref_in_turn",))
 
 
 @dataclass(frozen=True)
@@ -244,13 +250,35 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         return {"messages": replies}
 
     def _decide_in_order(self, calls: Sequence[ToolCall], ctx: GateContext) -> list[Decision]:
-        """Decide each call against the ledger plus the reserves of the turn's earlier charges."""
+        """Decide each call against the ledger plus the reserves of the turn's earlier charges.
+
+        A call on a charge that an earlier call of the turn may still change is denied
+        (`charge_ref_in_turn`): its check would rest on a reserve that rejecting the earlier
+        call undoes. Budget alone needs no such rule: a rejection only frees budget.
+        """
         decisions: list[Decision] = []
+        taken: set[str] = set()  # Refs of the turn's charges that may still run.
         for call in calls:
-            decision = self._decide(call, ctx)
+            if self._planned_ref(call, ctx) in taken:
+                decision: Decision = _SAME_CHARGE_IN_TURN
+            else:
+                decision = self._decide(call, ctx)
+            if not isinstance(decision, Deny) and decision.closed is not None:
+                taken.add(decision.closed.charge_ref)
             decisions.append(decision)
             ctx = _with_reserve(ctx, decision)
         return decisions
+
+    def _planned_ref(self, call: ToolCall, ctx: GateContext) -> str | None:
+        """The `charge_ref` the call's builder gives it, as `decide` would build it, if any."""
+        spec = self._specs.get(call.name)
+        if spec is None or spec.to_closed_mandate is None or ctx.mandate is None:
+            return None
+        try:
+            args = spec.args_model.model_validate(call.args, strict=True, extra="forbid")
+            return spec.to_closed_mandate(args, call.id).charge_ref
+        except ValueError:  # `decide` denies the call (`invalid_args:…`).
+            return None
 
     def _decide(self, call: ToolCall, ctx: GateContext) -> Decision:
         spec = self._specs.get(call.name)

@@ -708,26 +708,84 @@ def test_a_charge_waiting_for_approval_also_reserves_budget() -> None:
     ]
 
 
+def increase(
+    call_id: str, previous_minor: int, amount_minor: int, payer: str = "cust-juan"
+) -> LcToolCall:
+    return call(
+        "request_payment",
+        call_id,
+        payer=payer,
+        amount_minor=amount_minor,
+        previous_amount_minor=previous_minor,
+        link_ref="ch_link",
+    )
+
+
+def link_reserved(minor: int) -> GateContext:
+    """A context whose ledger holds the pending link `ch_link` at `minor`."""
+    link = ConsumptionEntry(charge_ref="ch_link", kind="reserve", amount=mxn(minor), at=NOW)
+    return gate_context(ledger=(link,))
+
+
 def test_two_increases_of_one_link_in_one_turn() -> None:
-    # The first increase reserves its delta, so the second no longer starts from 30000.
-    link = ConsumptionEntry(charge_ref="ch_link", kind="reserve", amount=mxn(30000), at=NOW)
-    rig = Rig(context=gate_context(ledger=(link,)))
+    # One charge changes at most once per turn: the second step waits for the next turn.
+    rig = Rig(context=link_reserved(30000))
 
-    def increase(call_id: str, amount_minor: int) -> LcToolCall:
-        return call(
-            "request_payment",
-            call_id,
-            payer="cust-juan",
-            amount_minor=amount_minor,
-            previous_amount_minor=30000,
-            link_ref="ch_link",
-        )
-
-    result = rig.graph().invoke(turn(increase("c1", 45000), increase("c2", 50000)), rig.thread)
+    result = rig.graph().invoke(
+        turn(increase("c1", 30000, 45000), increase("c2", 30000, 50000)), rig.thread
+    )
 
     assert "__interrupt__" not in result
     assert [run["amount_minor"] for run in rig.charge.runs] == [45000]
-    assert replies(result)["c2"].content == "Not executed: mandate:previous_amount_mismatch"
+    assert replies(result)["c2"].content == "Not executed: charge_ref_in_turn"
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_a_step_after_a_pending_change_of_its_charge_never_runs(approved: bool) -> None:
+    # B only matches the link if A runs; rejecting A must not leave B raising it from 40k.
+    rig = Rig(context=link_reserved(40000))
+    graph = rig.graph()
+    first = graph.invoke(
+        turn(increase("a", 40000, 50000, payer="cust-ana"), increase("b", 50000, 60000)),
+        rig.thread,
+    )
+    (request,) = pending(first)
+    assert (request.call_id, request.reasons) == ("a", ("mandate:payer_not_allowed",))
+
+    resumed = graph.invoke(Command(resume={"a": answer(request, approved=approved)}), rig.thread)
+
+    ran = [run["amount_minor"] for run in rig.charge.runs]
+    assert ran == ([50000] if approved else [])
+    assert replies(resumed)["b"].content == "Not executed: charge_ref_in_turn"
+
+
+def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
+    rig = Rig()
+    created = call("request_payment", "c1", payer="cust-juan", amount_minor=35000)
+    raised = call(
+        "request_payment",
+        "c2",
+        payer="cust-juan",
+        amount_minor=45000,
+        previous_amount_minor=35000,
+        link_ref="ch_c1",  # The ref the builder mints for c1.
+    )
+
+    result = rig.graph().invoke(turn(created, raised), rig.thread)
+
+    assert [run["amount_minor"] for run in rig.charge.runs] == [35000]
+    assert replies(result)["c2"].content == "Not executed: charge_ref_in_turn"
+
+
+def test_charges_on_different_refs_in_one_turn_are_judged_normally() -> None:
+    rig = Rig(context=link_reserved(30000))
+    created = call("request_payment", "c2", payer="cust-juan", amount_minor=35000)
+
+    result = rig.graph().invoke(turn(increase("c1", 30000, 45000), created), rig.thread)
+
+    assert "__interrupt__" not in result
+    assert [run["amount_minor"] for run in rig.charge.runs] == [45000, 35000]
+    assert all(reply.status == "success" for reply in replies(result).values())
 
 
 def test_approval_does_not_carry_over_to_another_thread() -> None:
