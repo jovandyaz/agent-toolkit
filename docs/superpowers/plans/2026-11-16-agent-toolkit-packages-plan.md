@@ -277,14 +277,14 @@ def test_money_add_requires_same_currency():
   - `ChainReport(ok: bool, first_bad_seq: int | None)`; `verify_chain(events: Iterable[AuditEvent]) -> ChainReport`
   - `testing.InMemoryAuditStore`; `adapters.postgres.PostgresAuditStore(conn)`; `schema.sql` con tabla `audit_events` (`seq bigint primary key`, `prev_hash text unique not null`, `hash text unique not null`, …) y comentario con el `REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM <rol_app>` que aplica la app.
 
-- [ ] **Step 1: Tests de núcleo**: cadena de 3 eventos verifica; alterar `decision` del 2.º → `first_bad_seq == 2`; reordenar → falla; `payload_hash` de un payload con teléfono no contiene el teléfono.
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa. **Step 4:** Run → PASS.
-- [ ] **Step 5: Tests Postgres** (usan `DATABASE_URL`; se saltan con mensaje si falta):
+- [x] **Step 1: Tests de núcleo**: cadena de 3 eventos verifica; alterar `decision` del 2.º → `first_bad_seq == 2`; reordenar → falla; `payload_hash` de un payload con teléfono no contiene el teléfono.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa. **Step 4:** Run → PASS.
+- [x] **Step 5: Tests Postgres** (usan `DATABASE_URL`; se saltan con mensaje si falta):
   - `test_append_and_verify_roundtrip`.
   - `test_concurrent_append_conflicts`: dos conexiones leen el mismo `last()` y anexan; la segunda lanza `ChainConflict`. **(Review Focus 5)**
   - `test_app_role_cannot_update_or_delete`: crea un rol, aplica el `REVOKE`, `UPDATE` falla con `InsufficientPrivilege`.
-- [ ] **Step 6:** Run (`docker run -e POSTGRES_PASSWORD=… -p 5432:5432 postgres:17` en local; servicio en CI) → FAIL; implementa; Run → PASS.
-- [ ] **Step 7:** Checks limpios. Commit `feat(audit-log): add hash-chained audit events with postgres store`.
+- [x] **Step 6:** Run (`docker run -e POSTGRES_PASSWORD=… -p 5432:5432 postgres:17` en local; servicio en CI) → FAIL; implementa; Run → PASS.
+- [x] **Step 7:** Checks limpios. Commit `feat(audit-log): add hash-chained audit events with postgres store`.
 
 ### Task 8: `evals`
 
