@@ -11,6 +11,7 @@ members = [
     "agent-toolkit-budgets",
     "agent-toolkit-mandates",
     "agent-toolkit-payments-core",
+    "agent-toolkit-policy-gate",
     "agent-toolkit-webhooks",
 ]
 
@@ -69,6 +70,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
+
+[[package]]
+name = "agent-toolkit-policy-gate"
+version = "0.1.0a1"
+source = { editable = "packages/policy-gate" }
+dependencies = [
+    { name = "agent-toolkit-budgets" },
+    { name = "agent-toolkit-mandates" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agent-toolkit-budgets", editable = "packages/budgets" },
+    { name = "agent-toolkit-mandates", editable = "packages/mandates" },
+    { name = "pydantic", specifier = ">=2.14,<3" },
+]
 
 [[package]]
 name = "agent-toolkit-webhooks"

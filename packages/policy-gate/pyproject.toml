@@ -1,0 +1,18 @@
+[project]
+name = "agent-toolkit-policy-gate"
+version = "0.1.0a1"
+description = "Deterministic gate for agent tool calls: allow, require approval or deny, from tool risk, mandates and budgets."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3", "agent-toolkit-mandates", "agent-toolkit-budgets"]
+
+[tool.uv.sources]
+agent-toolkit-mandates = { workspace = true }
+agent-toolkit-budgets = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.policy_gate"

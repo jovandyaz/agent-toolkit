@@ -197,37 +197,37 @@ def test_money_add_requires_same_currency():
 
 **Files:**
 - Create: `packages/policy-gate/pyproject.toml` (deps workspace `agent-toolkit-mandates`, `agent-toolkit-budgets` vía `[tool.uv.sources] … = { workspace = true }`), `src/agent_toolkit/policy_gate/{__init__,models,decide}.py`
-- Test: `packages/policy-gate/tests/test_decide.py`
+- Test: `packages/policy-gate/tests/test_decide.py`, `test_models.py`
 
 **Interfaces:**
-- Consumes: `mandates.check`, `ClosedMandate`, `OpenMandate`, `Amount`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
+- Consumes: `mandates.check`, `ClosedMandate`, `OpenMandate`, `Amount`, `RefState`, `Violation`; `budgets.check`, `BudgetState`, `BudgetLimits`.
 - Produces:
   - `Risk = Literal["low", "medium", "high"]`; `Effects(reads_sensitive: bool, changes_state: bool, external_comm: bool)`
-  - `ToolSpec(name, risk, effects, reversible: bool, financial: bool, args_model: type[BaseModel], to_closed_mandate: Callable[[BaseModel], ClosedMandate] | None)`; validación: `financial=True` exige `to_closed_mandate`.
+  - `ToolSpec(name, risk, effects, reversible: bool, financial: bool, args_model: type[BaseModel], to_closed_mandate: Callable[[BaseModel], ClosedMandate] | None)`; validación: `financial=True` exige `to_closed_mandate`, y solo una herramienta financiera lo acepta (en otra nunca correría). `decide` valida los args en modo estricto y rechaza claves desconocidas a toda profundidad aunque `args_model` no lo haga.
   - `SessionProfile(agent_id, principal_id, untrusted_input: bool, sensitive_access: bool, state_change: bool)`
   - `ToolCall(id: str, name: str, args: Mapping[str, object])`
   - `GateConfig(on_mandate_violation: Literal["deny", "require_approval"] = "require_approval")`
   - `Allow(kind="allow", args: BaseModel, closed: ClosedMandate | None)`, `RequireApproval(kind="require_approval", reasons: tuple[str, ...], args, closed)`, `Deny(kind="deny", reasons: tuple[str, ...])`; `Decision = Allow | RequireApproval | Deny` (unión discriminada por `kind`).
-  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, consumed: Amount | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime, config: GateConfig)`
+  - `GateContext(session: SessionProfile, mandate: OpenMandate | None, consumed: Amount | None, ref_state: RefState | None, budget_state: BudgetState, budget_limits: BudgetLimits, now: datetime (aware), config: GateConfig)` (R21: herramienta financiera con mandato exige `consumed` y `ref_state`, ambos del ledger de ese mandato; si falta alguno, `decide` lanza `ValueError` antes de toda regla. El llamador bloquea el mandato desde calcularlos hasta registrar la reserva, y un `ValueError` del ledger es deny, nunca allow).
   - `decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision`
 - Reglas, en orden (la primera que aplica decide `Deny`; las de aprobación se acumulan):
   1. `call.name != tool.name` → `Deny("tool_mismatch")`.
-  2. Args inválidos según `args_model` → `Deny("invalid_args: …")`.
+  2. Args inválidos según `args_model` → `Deny("invalid_args:<loc>:<type>")`, una razón por error (`loc` = `args.<ruta>`, o `closed.<ruta>` si falla el cierre del mandato; sin mensajes, que pueden traer PII).
   3. `budgets.check` no vacío → `Deny("budget_exceeded:<kind>")`.
-  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `account_not_allowed`, `mandate_mismatch`, `currency_mismatch`, `expired` o `revoked` → `Deny` siempre (no configurable). Otras violaciones → según `config`. `approval_reasons` → `RequireApproval`.
+  4. `financial`: sin mandato → `RequireApproval("no_mandate")`. Con mandato: `closed = tool.to_closed_mandate(args)`; un `ValueError`/`ValidationError` → `Deny("invalid_args:closed…")`; `closed.agent_id != session.agent_id` → `Deny("agent_mismatch")` antes de `check`. Violaciones `account_not_allowed`, `mandate_mismatch`, `agent_mismatch`, `currency_mismatch`, `expired`, `revoked`, `previous_amount_mismatch` o `charge_ref_reused` (y cualquiera nueva) → `Deny("mandate:<v>")` siempre (no configurable). `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` y `outside_window` → según `config`. `approval_reasons` → `RequireApproval("mandate:<r>")`.
   5. No financiero con `risk="high"` → `RequireApproval("high_risk")`.
   6. Sesión con las tres banderas Rule of Two y `effects.changes_state`, salvo herramienta financiera con `Verdict.ok` → `RequireApproval("rule_of_two")`.
   7. Si no → `Allow`.
 
-- [ ] **Step 1: Tests** (una por regla, más):
+- [x] **Step 1: Tests** (una por regla, más):
   - `test_foreign_account_is_denied_even_if_config_says_approval` (7.3(c)).
   - `test_open_amount_qr_requires_approval`.
   - `test_violation_follows_config` (`amount_out_of_range` con ambas configuraciones).
   - `test_rule_of_two_allows_verified_mandate_but_not_unmandated_state_change`.
   - `test_allow_returns_parsed_args_and_closed_mandate`.
   - `test_low_risk_read_is_allowed_without_mandate`.
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa `decide` como función pura. **Step 4:** Run → PASS.
-- [ ] **Step 5:** Checks limpios; `lint-imports` confirma que el núcleo no importa `langgraph`. Commit `feat(policy-gate): add deterministic tool-call decisions`.
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa `decide` como función pura. **Step 4:** Run → PASS.
+- [x] **Step 5:** Checks limpios; `lint-imports` confirma que el núcleo no importa `langgraph`. Commit `feat(policy-gate): add deterministic tool-call decisions`.
 
 ### Task 6: `policy-gate` (adaptador LangGraph)
 
