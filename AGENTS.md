@@ -34,5 +34,7 @@ Hackatón México (separate private repo). Second planned consumer: CDMX permit 
 
 ## Git
 Conventional Commits, single line, English, no trailers. Branch per package, PR per package; never
-push to `main`. Release tags for the app: `v0.1.0a1` (payments-core, webhooks, mandates),
-`v0.1.0a2` (+ budgets, policy-gate, audit-log), `v0.1.0a3` (+ evals), `v0.1.0`.
+push to `main`. Lockstep versioning: all seven packages share one PEP 440 version and one tag
+`v{version}` (latest `v0.1.0rc1`, next `v0.1.0`). A release bumps every `pyproject.toml`, refreshes
+`uv.lock` and moves `CHANGELOG.md` Unreleased; CI checks the tag with `scripts/check_versions.py`.
+Revisit per-package versions once the packages are on PyPI.
