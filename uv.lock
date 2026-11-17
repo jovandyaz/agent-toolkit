@@ -8,6 +8,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "agent-toolkit-mandates",
     "agent-toolkit-payments-core",
     "agent-toolkit-webhooks",
 ]
@@ -20,6 +21,17 @@ dev = [
     { name = "pytest", specifier = ">=9.2,<10" },
     { name = "ruff", specifier = ">=0.17,<0.18" },
 ]
+
+[[package]]
+name = "agent-toolkit-mandates"
+version = "0.1.0a1"
+source = { editable = "packages/mandates" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
 
 [[package]]
 name = "agent-toolkit-payments-core"

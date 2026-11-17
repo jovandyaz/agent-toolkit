@@ -150,7 +150,7 @@ def test_money_add_requires_same_currency():
   - `Receipt(status: Literal["verified", "executed", "rejected"], verifier: str, reference: str, mandate_hash: str, at: datetime)`
   - Protocols `Signer.sign(payload: bytes) -> bytes`, `Verifier.verify(payload: bytes, signature: bytes) -> bool`; `HmacSha256Signer(key: bytes)` implementa ambos (`hmac.compare_digest`).
 
-- [ ] **Step 1: Tests de `check`** (mandato base: rango 100–500000 MXN, presupuesto diario 1000000, cuentas `{"acct-own"}`, pagadores `{"cust-juan"}`, rieles `{"codi_push","codi_link"}`, tz `America/Mexico_City`)
+- [x] **Step 1: Tests de `check`** (mandato base: rango 100–500000 MXN, presupuesto diario 1000000, cuentas `{"acct-own"}`, pagadores `{"cust-juan"}`, rieles `{"codi_push","codi_link"}`, tz `America/Mexico_City`)
   - `test_in_mandate_charge_is_ok`.
   - `test_foreign_receiving_account_is_violation` → `"account_not_allowed"`.
   - `test_unknown_payer_needs_approval` → `approval_reasons == ("payer_not_allowed",)`, `violations == ()`.
@@ -159,14 +159,14 @@ def test_money_add_requires_same_currency():
   - `test_budget_counts_requested_amount`: `consumed=990000` + 20000 → `"budget_exceeded"`.
   - `test_expired_revoked_and_mismatch`.
   - `test_outside_daily_window` (21:59 vs 22:01 local con ventana 07:00–22:00).
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Implementa `models.py` y `check.py`; reúne todas las violaciones (no se detiene en la primera). **Step 4:** Run → PASS.
-- [ ] **Step 5: Tests de `consumed_in_period`**
+- [x] **Step 2:** Run → FAIL. **Step 3:** Implementa `models.py` y `check.py`; reúne todas las violaciones (no se detiene en la primera). **Step 4:** Run → PASS.
+- [x] **Step 5: Tests de `consumed_in_period`**
   - `test_release_only_subtracts_matching_reserve`: reserve 30000 + release del mismo `charge_ref` → 0; release de un `charge_ref` sin reserve → `ValueError`.
   - `test_daily_period_uses_mandate_timezone`: reserve a las 23:30 del 1 dic local y `now` 00:30 del 2 dic local → 0. **(Review Focus 4)**
   - `test_total_period_ignores_time`.
-- [ ] **Step 6:** Run → FAIL; implementa (la semana inicia el lunes, el mes en el día 1, ambos en `tz`); Run → PASS.
-- [ ] **Step 7: Tests de firma**: `content_hash` estable entre instancias iguales y distinto si cambia `amount`; `HmacSha256Signer` verifica su firma y rechaza otra llave. Implementa; Run → PASS.
-- [ ] **Step 8:** Checks limpios. Commit `feat(mandates): add open/closed mandates, check and consumption`.
+- [x] **Step 6:** Run → FAIL; implementa (la semana inicia el lunes, el mes en el día 1, ambos en `tz`); Run → PASS.
+- [x] **Step 7: Tests de firma**: `content_hash` estable entre instancias iguales y distinto si cambia `amount`; `HmacSha256Signer` verifica su firma y rechaza otra llave. Implementa; Run → PASS.
+- [x] **Step 8:** Checks limpios. Commit `feat(mandates): add open/closed mandates, check and consumption`.
 - [ ] **Step 9: Entrega a la app.** Merge de las Tareas 1–3 a `main`; tag `v0.1.0a1`. Avisar al equipo de la app (ver "Entregas a la app").
 
 ### Task 4: `budgets`

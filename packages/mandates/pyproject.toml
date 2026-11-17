@@ -1,0 +1,14 @@
+[project]
+name = "agent-toolkit-mandates"
+version = "0.1.0a1"
+description = "Open and closed mandates for agents that issue payment requests: a pure check and budget consumption."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.mandates"
