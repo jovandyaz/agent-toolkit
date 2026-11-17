@@ -170,6 +170,15 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   `tool`, `args`, `reasons`, `closed` (the charge as it will run, or null), `closed_mandate_hash`
   and `request_hash`. An approval binds the thread, call, tool, validated arguments, closed
   mandate and reasons through the `request_hash`; resume with a JSON `ApprovalDecision`.
+- Each call the adapter runs gets an idempotency key in its config
+  (`idempotency_key_from_config`): the SHA-256 hex of the compact JSON array
+  `[thread_id, call_id]`, the same on every execution of that call.
+- Re-runs. When a tool or `on_decision` raises after some calls of a turn ran, running the thread
+  again executes the whole turn again, with LangGraph replaying stored approvals. A charge under a
+  mandate that already ran and recorded its reserve is then denied (`mandate:charge_ref_reused`,
+  or `mandate:previous_amount_mismatch` for an increase) with a reply that tells the model to
+  check the charge's status, and `on_decision` gets that `Deny`; a call that left no reserve (no
+  mandate, open amount) runs again under the same idempotency key.
 
 ## Caller duties
 
@@ -181,7 +190,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...).model_dump(mode="jso
   `ctx.thread_id` and `ctx.call_id` together (a call id alone can repeat in another thread),
   never from the arguments. A random ref voids every approval (fails closed).
 - Execute exactly the returned `closed` (the tool reads it with `closed_mandate_from_config`) and
-  reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent on it.
+  reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent: send
+  `idempotency_key_from_config(config)` as the provider's idempotency key, so a re-run never issues
+  a charge twice (not `charge_ref`: an increase keeps its charge's ref).
 - Wire `on_decision(call, decision, approval)` to `audit-log`. The node calls it once per call
   with its final decision, before the call runs, so an audit log that fails blocks the call.
 - Resume only from the trusted approval screen through an authenticated channel, never from chat

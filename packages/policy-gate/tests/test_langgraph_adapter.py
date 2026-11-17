@@ -23,6 +23,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, Interrupt
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from agent_toolkit import mandates
 from agent_toolkit.budgets import BudgetLimits, BudgetState
 from agent_toolkit.budgets.adapters.langchain import BudgetCallbackHandler, BudgetExceededError
 from agent_toolkit.mandates import (
@@ -49,10 +50,12 @@ from agent_toolkit.policy_gate import (
 )
 from agent_toolkit.policy_gate.adapters.langgraph import (
     CLOSED_MANDATE_KEY,
+    IDEMPOTENCY_KEY,
     ApprovalDecision,
     ApprovalRequest,
     GatedToolNode,
     closed_mandate_from_config,
+    idempotency_key_from_config,
 )
 
 NOW = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
@@ -158,21 +161,35 @@ DELETE = plain_spec("delete_customer", "high", WRITES)  # Needs approval: high_r
 
 @dataclass
 class FakeTool:
-    """A tool that records the arguments and the gate's closed mandate of every run."""
+    """A tool that records the arguments, closed mandate and idempotency key of every run.
+
+    With `reserves_into`, it also records the reserve of the charge it issued, as the
+    application's money tool must.
+    """
 
     name: str
     args_schema: type[BaseModel] = CustomerArgs
     runs: list[dict[str, object]] = field(default_factory=list)
     closed_seen: list[ClosedMandate | None] = field(default_factory=list)
+    keys_seen: list[str] = field(default_factory=list)
     fails_with: Exception | None = None
     handles_errors: bool = False
+    reserves_into: list[ConsumptionEntry] | None = None
 
     def as_tool(self) -> BaseTool:
         def run(config: RunnableConfig, **kwargs: object) -> str:
             self.runs.append(kwargs)
-            self.closed_seen.append(closed_mandate_from_config(config))
+            closed = closed_mandate_from_config(config)
+            self.closed_seen.append(closed)
+            self.keys_seen.append(idempotency_key_from_config(config))
             if self.fails_with is not None:
                 raise self.fails_with
+            reserved = None if closed is None else mandates.reserve_amount(closed)
+            if self.reserves_into is not None and closed is not None and reserved is not None:
+                entry = ConsumptionEntry(
+                    charge_ref=closed.charge_ref, kind="reserve", amount=reserved, at=NOW
+                )
+                self.reserves_into.append(entry)
             return f"{self.name} ran"
 
         return StructuredTool.from_function(
@@ -245,6 +262,7 @@ class Rig:
     reports: list[Report] = field(default_factory=list)
     ran_at_report: list[tuple[str, int]] = field(default_factory=list)
     audit_error: Exception | None = None  # Raised by `record`, as a failing audit log would.
+    recorded: list[ConsumptionEntry] = field(default_factory=list)  # Reserves tools recorded.
     contexts_built: int = 0
     thread: RunnableConfig = field(
         default_factory=lambda: RunnableConfig(configurable={"thread_id": str(uuid.uuid4())})
@@ -276,7 +294,15 @@ class Rig:
 
     def build_context(self, state: MessagesState) -> GateContext:
         self.contexts_built += 1
-        return self.context
+        if not self.recorded:
+            return self.context
+        ledger = (*(self.context.ledger or ()), *self.recorded)
+        return self.context.model_copy(update={"ledger": ledger})
+
+    def recording_reserves(self) -> "Rig":
+        """This rig, with a charge tool that records its reserves into the context's ledger."""
+        self.charge.reserves_into = self.recorded
+        return self
 
     def record(self, call: ToolCall, decision: Decision, approval: ApprovalDecision | None) -> None:
         if self.audit_error is not None:
@@ -930,6 +956,112 @@ def test_every_turn_needs_a_thread_id(proposed: LcToolCall) -> None:
     with pytest.raises(ValueError, match="thread_id"):
         rig.graph(durable=False).invoke(turn(proposed))
     assert (rig.total_runs(), rig.contexts_built, rig.reports) == (0, 0, [])
+
+
+# Idempotency keys and re-runs after a partial failure.
+
+
+def expected_key(thread_id: str, call_id: str) -> str:
+    """The documented key: SHA-256 hex of the compact JSON array [thread_id, call_id]."""
+    canonical = json.dumps([thread_id, call_id], separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def test_each_call_gets_an_idempotency_key_from_its_thread_and_id() -> None:
+    # Whatever the caller put under the key, each tool gets the key of its own call.
+    rig = Rig()
+    config = RunnableConfig(configurable={"thread_id": rig.thread_id, IDEMPOTENCY_KEY: "forged"})
+
+    rig.graph().invoke(turn(call("lookup_customer", "c1"), call("lookup_customer", "c2")), config)
+
+    assert rig.lookup.keys_seen == [expected_key(rig.thread_id, c) for c in ("c1", "c2")]
+    assert expected_key(rig.thread_id, "c1") != expected_key("another-thread", "c1")
+
+
+def test_idempotency_key_from_config_needs_the_node() -> None:
+    with pytest.raises(ValueError, match="GatedToolNode"):
+        idempotency_key_from_config(RunnableConfig())
+    with pytest.raises(TypeError, match="str"):
+        idempotency_key_from_config(RunnableConfig(configurable={IDEMPOTENCY_KEY: 7}))
+
+
+def fail_once(rig: Rig) -> None:
+    rig.lookup.fails_with = RuntimeError("provider down")
+
+
+@pytest.mark.parametrize(
+    ("context", "charge", "reason"),
+    [
+        pytest.param(
+            gate_context(),
+            call("request_payment", "c1", payer="cust-juan", amount_minor=35000),
+            "mandate:charge_ref_reused",
+            id="new_charge",
+        ),
+        pytest.param(
+            link_reserved(30000),
+            increase("c1", 30000, 45000),
+            "mandate:previous_amount_mismatch",
+            id="amount_increase",
+        ),
+    ],
+)
+def test_re_run_after_a_recorded_reserve_tells_the_model_to_check_the_charge(
+    context: GateContext, charge: LcToolCall, reason: str
+) -> None:
+    # c1 ran and recorded its reserve, then c2 failed, failing the node. Running the thread
+    # again judges c1 against a ledger that already holds its reserve: it is denied, and the
+    # model must not be told that a charge which exists was never executed.
+    rig = Rig(context=context).recording_reserves()
+    fail_once(rig)
+    graph = rig.graph()
+    with pytest.raises(RuntimeError, match="provider down"):
+        graph.invoke(turn(charge, call("lookup_customer", "c2")), rig.thread)
+    assert (len(rig.charge.runs), len(rig.recorded)) == (1, 1)
+    rig.lookup.fails_with = None
+    rig.reports.clear()
+
+    again = graph.invoke(None, rig.thread)
+
+    assert len(rig.charge.runs) == 1
+    reply = replies(again)["c1"]
+    assert reply.status == "error"
+    assert (
+        reply.content
+        == f"Check the charge's status before retrying, it may already exist: {reason}"
+    )
+    assert [(c.id, d.kind) for c, d, _ in rig.reports] == [("c1", "deny"), ("c2", "allow")]
+    assert rig.reports[0][1] == Deny(reasons=(reason,))
+    assert replies(again)["c2"].status == "success"
+
+
+@pytest.mark.parametrize(
+    ("context", "reason"),
+    [
+        pytest.param(gate_context(mandate=None, ledger=None), "no_mandate", id="no_mandate"),
+        pytest.param(gate_context(), "mandate:open_amount", id="open_amount"),
+    ],
+)
+def test_re_run_after_an_approved_call_without_a_reserve_runs_it_again_under_its_key(
+    context: GateContext, reason: str
+) -> None:
+    # Nothing on the ledger shows that c1 ran, and LangGraph replays the stored approval, so
+    # the re-run runs c1 again: with the same idempotency key, which the tool must honour.
+    rig = Rig(context=context).recording_reserves()
+    fail_once(rig)
+    graph = rig.graph()
+    charge = call("request_payment", "c1", payer="cust-juan")
+    (request,) = pending(graph.invoke(turn(charge, call("lookup_customer", "c2")), rig.thread))
+    assert request.reasons == (reason,)
+    with pytest.raises(RuntimeError, match="provider down"):
+        graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+    rig.lookup.fails_with = None
+
+    again = graph.invoke(None, rig.thread)
+
+    assert len(rig.charge.runs) == 2
+    assert rig.charge.keys_seen == 2 * [expected_key(rig.thread_id, "c1")]
+    assert replies(again)["c1"].status == "success"
 
 
 # Unknown tools, bad input and configuration.

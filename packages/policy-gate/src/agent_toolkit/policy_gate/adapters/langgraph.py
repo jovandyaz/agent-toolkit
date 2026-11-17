@@ -5,7 +5,9 @@ Install with the `langgraph` extra. Put it where a graph would put `ToolNode`:
 
 Each run reads the `tool_calls` of `state["messages"][-1]`, which must be an `AIMessage` (the
 node never looks further back, so re-entering it cannot run a turn twice), and needs
-`configurable["thread_id"]` (ValueError otherwise, before anything is decided). Then it:
+`configurable["thread_id"]` (ValueError otherwise, before anything is decided). Each call's
+idempotency key is the SHA-256 hex of the compact JSON array `[thread_id, call_id]`: the same
+on every execution of the call, and different for any other call. Then it:
 
 1. Builds the context with `context(state)` and decides every call with
    `decide(..., thread_id=thread_id)`, in order, before running any; a financial tool's builder
@@ -39,11 +41,16 @@ node never looks further back, so re-entering it cannot run a turn twice), and n
    refused approval rejects its own call (`approval_missing`, `approval_mismatch`,
    `approval_rejected`).
 4. Runs the allowed and approved calls one at a time, in order, with their validated
-   arguments (`args.model_dump(mode="json")`, exactly what the approval showed) and the
-   checked `ClosedMandate` (None if the call has none) in `configurable[CLOSED_MANDATE_KEY]`
-   of the tool's config; a financial tool reads it with `closed_mandate_from_config` and
-   issues exactly that charge. Every other call gets
-   `ToolMessage(status="error", content="Not executed: <reasons>")`.
+   arguments (`args.model_dump(mode="json")`, exactly what the approval showed). The tool's
+   config holds the checked `ClosedMandate` (None if the call has none) in
+   `configurable[CLOSED_MANDATE_KEY]` and the call's idempotency key in
+   `configurable[IDEMPOTENCY_KEY]`; a financial tool reads them with
+   `closed_mandate_from_config` and `idempotency_key_from_config`, issues exactly that charge
+   and sends the key to the provider. Every other call gets
+   `ToolMessage(status="error", content="Not executed: <reasons>")`, except a call denied for
+   `mandate:charge_ref_reused` or `mandate:previous_amount_mismatch`, which also describe a
+   charge that already ran (see "Re-runs"): it gets `ToolMessage(status="error",
+   content="Check the charge's status before retrying, it may already exist: <reasons>")`.
 5. Calls `on_decision(call, decision, approval)` once per call with its final decision, always
    before the call would run: first a `Deny` for every call that does not run, before any
    tool runs; then, right before each call runs, `Allow`, or `RequireApproval` with the
@@ -51,9 +58,20 @@ node never looks further back, so re-entering it cannot run a turn twice), and n
    after it, from running: an audit log that cannot record a charge blocks it. A rejection's
    reasons are its `approval_*` code followed by the gate's, and it carries the human's answer
    if there was one. The report is the decision, not the result: a call that then fails was
-   reported as allowed. Calls after a failed one are neither reported nor run; running the
-   thread again decides and reports them. The application wires `on_decision` to `audit-log`;
-   its exceptions propagate.
+   reported as allowed. Calls after a failed one are neither reported nor run (see
+   "Re-runs"). The application wires `on_decision` to `audit-log`; its exceptions propagate.
+
+Re-runs. A node is LangGraph's unit of retry. When a tool or `on_decision` raises after some
+calls of the turn ran, the node fails and its replies are lost; running the thread again
+(`graph.invoke(None, config)`) executes the whole turn again, and LangGraph replays the
+approvals it already stored instead of interrupting. Every call is decided and reported again,
+so the audit log can hold two records of one call, and a call that already ran:
+
+- under a mandate, with its reserve recorded, is denied (`mandate:charge_ref_reused`, or
+  `mandate:previous_amount_mismatch` for an increase); the model is told to check the charge's
+  status, not that it never ran, and `on_decision` receives that `Deny`;
+- without a reserve (no mandate, or an open amount) runs again on the stored approval, with the
+  same idempotency key: the tool must not issue it twice (send the key to the provider).
 
 Resume with `graph.invoke(Command(resume={call_id: decision.model_dump(mode="json")}), config)`,
 `decision` an `ApprovalDecision` (its `at` then travels as an ISO 8601 string): the checkpoint
@@ -82,9 +100,10 @@ Duties of the application:
   from tool arguments.
 - A financial tool issues the charge from `closed_mandate_from_config(config)`, not one
   rebuilt from its arguments, and the reserve is recorded under its `charge_ref`.
-- A node is LangGraph's unit of retry. A tool or `on_decision` error after some calls ran fails
-  the node, and running the thread again re-runs every call of the turn. Give this node no
-  `RetryPolicy` and make tools that move money idempotent (keyed by `charge_ref`).
+- Make tools that move money idempotent under `idempotency_key_from_config(config)`: send it
+  as the provider's idempotency key, so a re-run (see "Re-runs") never issues a charge twice.
+  The key, not `charge_ref`, identifies the call: an increase keeps its charge's ref. Give this
+  node no `RetryPolicy`.
 - Tools must not call `interrupt()`: resuming it re-runs this node, and every call that ran
   before it would run again.
 - Each tool takes exactly the arguments of its spec's `args_model` (checked at construction):
@@ -132,14 +151,19 @@ from agent_toolkit.policy_gate.models import (
 
 __all__ = [
     "CLOSED_MANDATE_KEY",
+    "IDEMPOTENCY_KEY",
     "ApprovalDecision",
     "ApprovalRequest",
     "GatedToolNode",
     "closed_mandate_from_config",
+    "idempotency_key_from_config",
 ]
 
 CLOSED_MANDATE_KEY = "agent_toolkit_closed_mandate"
 """Key in `configurable` of the config a tool runs with: the gate's checked `ClosedMandate`."""
+
+IDEMPOTENCY_KEY = "agent_toolkit_idempotency_key"
+"""Key in `configurable` of the config a tool runs with: the running call's idempotency key."""
 
 Identifier = Annotated[str, Field(min_length=1)]
 
@@ -156,6 +180,22 @@ def closed_mandate_from_config(config: RunnableConfig) -> ClosedMandate | None:
     if closed is not None and not isinstance(closed, ClosedMandate):
         raise TypeError(f"{CLOSED_MANDATE_KEY} holds {type(closed).__name__}, not a ClosedMandate")
     return closed
+
+
+def idempotency_key_from_config(config: RunnableConfig) -> str:
+    """The idempotency key of the running call: stable across re-runs, unique to the call.
+
+    The SHA-256 hex of the compact JSON array `[thread_id, call_id]`. A tool that moves money
+    sends it as the provider's idempotency key, so running the turn again never issues the same
+    request twice. Raises ValueError outside `GatedToolNode` (no key) and TypeError if the key
+    holds anything but a string.
+    """
+    key = config.get("configurable", {}).get(IDEMPOTENCY_KEY)
+    if key is None:
+        raise ValueError(f"no {IDEMPOTENCY_KEY} in the config: run the tool through GatedToolNode")
+    if not isinstance(key, str):
+        raise TypeError(f"{IDEMPOTENCY_KEY} holds {type(key).__name__}, not a str")
+    return key
 
 
 class ApprovalRequest(BaseModel):
@@ -199,6 +239,9 @@ class ApprovalDecision(BaseModel):
 
 _ANSWERS = TypeAdapter(dict[str, ApprovalDecision])
 _SAME_CHARGE_IN_TURN = Deny(reasons=("charge_ref_in_turn",))
+# Denials that a re-run also gives a charge that already ran: the refusal must not claim that
+# the charge was never executed.
+_MAY_HAVE_RUN = frozenset({"mandate:charge_ref_reused", "mandate:previous_amount_mismatch"})
 
 
 @dataclass(frozen=True)
@@ -261,7 +304,8 @@ class GatedToolNode[StateT: Mapping[str, object]]:
                 replies.append(_refusal(outcome.call, outcome.decision))
                 continue
             self._report(outcome)  # Before it runs: a failing audit log stops the call.
-            replies.append(self._run(outcome.call, outcome.decision, config))
+            key = _idempotency_key(thread_id, outcome.call.id)
+            replies.append(self._run(outcome.call, outcome.decision, config, key))
         return {"messages": replies}
 
     def _decide_in_order(
@@ -309,11 +353,13 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         return decide(call, spec, ctx, thread_id=thread_id)
 
     def _run(
-        self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig
+        self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig, key: str
     ) -> ToolMessage:
         validated = tool_call(name=call.name, args=_json_args(decision), id=call.id)
-        # Always set, None included, so a value the caller put under the key never reaches a tool.
-        checked = patch_config(config, configurable={CLOSED_MANDATE_KEY: decision.closed})
+        # Always set, None included, so a value the caller put under a key never reaches a tool.
+        checked = patch_config(
+            config, configurable={CLOSED_MANDATE_KEY: decision.closed, IDEMPOTENCY_KEY: key}
+        )
         output = self._tools[call.name].invoke(validated, checked)
         if not isinstance(output, ToolMessage):
             raise TypeError(
@@ -363,6 +409,11 @@ def _with_reserve(ctx: GateContext, decision: Decision) -> GateContext:
         charge_ref=decision.closed.charge_ref, kind="reserve", amount=amount, at=ctx.now
     )
     return ctx.model_copy(update={"ledger": (*ctx.ledger, entry)})
+
+
+def _idempotency_key(thread_id: str, call_id: str) -> str:
+    canonical = json.dumps([thread_id, call_id], separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _json_args(decision: Allow | RequireApproval) -> dict[str, object]:
@@ -450,8 +501,13 @@ def _rejected(code: str, decision: RequireApproval) -> Deny:
 
 
 def _refusal(call: ToolCall, deny: Deny) -> ToolMessage:
+    reasons = ", ".join(deny.reasons)
+    if _MAY_HAVE_RUN.intersection(deny.reasons):
+        content = f"Check the charge's status before retrying, it may already exist: {reasons}"
+    else:
+        content = f"Not executed: {reasons}"
     return ToolMessage(
-        content=f"Not executed: {', '.join(deny.reasons)}",
+        content=content,
         tool_call_id=call.id,
         name=call.name,
         status="error",
