@@ -112,6 +112,15 @@ def test_mandate_rejects_invalid_constraints(overrides: dict[str, object], messa
 
 
 @pytest.mark.parametrize(
+    "tz", ["america/mexico_city", "AMERICA/MEXICO_CITY", "America/Mexico_city"]
+)
+def test_mandate_rejects_a_wrong_case_time_zone_on_every_os(tz: str) -> None:
+    # Case-insensitive filesystems (macOS) would load these; Linux would not.
+    with pytest.raises(ValidationError, match="time zone"):
+        OpenMandate.model_validate(mandate_fields(tz=tz))
+
+
+@pytest.mark.parametrize(
     ("start", "end"),
     [(time(22, 0), time(7, 0)), (time(7, 0), time(7, 0))],
 )

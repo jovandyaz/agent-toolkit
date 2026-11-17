@@ -7,14 +7,21 @@ payment requests to customers (CoDi), and each payer approves separately in thei
 import hashlib
 import json
 from datetime import datetime, time
+from functools import cache
 from typing import Annotated, Literal, Self
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, available_timezones
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Identifier = Annotated[str, Field(min_length=1)]
 BudgetPeriod = Literal["day", "week", "month", "total"]
 ChargeKind = Literal["new_charge", "amount_increase"]
+
+
+@cache
+def _known_time_zones() -> frozenset[str]:
+    """IANA keys from the system database and the `tzdata` package, read once per process."""
+    return frozenset(available_timezones())
 
 
 def require_aware(moment: datetime, name: str) -> None:
@@ -111,10 +118,10 @@ class OpenMandate(BaseModel):
     @field_validator("tz")
     @classmethod
     def _known_time_zone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError) as error:
-            raise ValueError(f"unknown time zone {value!r}") from error
+        # Exact membership, not ZoneInfo(value): a case-insensitive filesystem (macOS) would load
+        # "america/mexico_city", which Linux rejects.
+        if value not in _known_time_zones():
+            raise ValueError(f"unknown time zone {value!r}")
         return value
 
     @model_validator(mode="after")
