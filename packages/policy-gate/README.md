@@ -19,6 +19,8 @@ Not on PyPI: see the root README, "Install from a git tag". With `uv`, `agent-to
 ## Example
 
 ```python
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, ConfigDict
@@ -33,6 +35,7 @@ from agent_toolkit.mandates import (
 )
 from agent_toolkit.policy_gate import (
     Allow,
+    BuildContext,
     Effects,
     GateConfig,
     GateContext,
@@ -53,13 +56,19 @@ class RequestPaymentArgs(BaseModel):
     reference: str
 
 
-def to_closed_mandate(args: BaseModel, call_id: str) -> ClosedMandate:
+def mint_ref(ctx: BuildContext) -> str:
+    """A new charge's ref, minted by the app from the thread and the call, never the arguments."""
+    canonical = json.dumps([ctx.thread_id, ctx.call_id], separators=(",", ":"))
+    return "chg_" + hashlib.sha256(canonical.encode()).hexdigest()[:32]
+
+
+def to_closed_mandate(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     assert isinstance(args, RequestPaymentArgs)
     return ClosedMandate(
         open_mandate_id="m1",
         agent_id="agent1",
         kind="new_charge",
-        charge_ref=f"chg_{call_id}",  # minted by the app from the call, never from the arguments
+        charge_ref=mint_ref(ctx),
         payer=args.payer,
         receiving_account="acct1",
         rail="codi",
@@ -114,7 +123,7 @@ ok = ToolCall(
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 20_000, "reference": "invoice-42"},
 )
-decision = decide(ok, tool, ctx)
+decision = decide(ok, tool, ctx, thread_id="thread-1")
 assert isinstance(decision, Allow) and decision.closed is not None  # execute exactly this charge
 
 too_big = ToolCall(
@@ -122,14 +131,14 @@ too_big = ToolCall(
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 90_000, "reference": "invoice-43"},
 )
-assert decide(too_big, tool, ctx).kind == "require_approval"  # mandate:amount_out_of_range
+assert decide(too_big, tool, ctx, thread_id="thread-1").kind == "require_approval"  # out of range
 
 foreign = ToolCall(
     id="c3",
     name="request_payment",
     args={"payer": "payer1", "amount_minor": 20_000, "reference": "x", "to": "me"},
 )
-assert decide(foreign, tool, ctx).kind == "deny"  # unknown arguments are rejected
+assert decide(foreign, tool, ctx, thread_id="thread-1").kind == "deny"  # unknown arguments
 ```
 
 In a LangGraph graph, `GatedToolNode` replaces `ToolNode`. It needs a checkpointer and a thread,
@@ -150,7 +159,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)
   `high_risk`, Rule of Two. `Deny` beats `RequireApproval`. Reasons are stable strings such as
   `invalid_args:args.amount_minor:int_type`, `mandate:budget_exceeded`, `no_mandate`; the full
   list is in the `decide` docstring.
-- A `financial` tool must supply `to_closed_mandate(args, call_id)`; no other tool may.
+- A `financial` tool must supply `to_closed_mandate(args, ctx)`, where `ctx` is a `BuildContext`
+  with `thread_id` and `call_id`; no other tool may. `decide` takes the thread as
+  `thread_id=...`, required for a financial call under a mandate (ValueError otherwise).
 - `rail_not_allowed`, `amount_out_of_range`, `budget_exceeded` and `outside_window` follow
   `GateConfig.on_mandate_violation`; every other violation (foreign account, wrong agent or
   currency, expired or revoked mandate, ledger contradictions) is always denied.
@@ -163,8 +174,9 @@ graph.invoke(Command(resume={call_id: ApprovalDecision(...)}), config)
   that mandate and only those (`None` raises). Hold the lock from the decision, across the
   interrupt, until the reserve is recorded.
 - The `to_closed_mandate` builder must be deterministic and side-effect free (it runs more than
-  once per call), and the application mints `charge_ref` server-side, for example from a hash of
-  the thread id and `call_id`. A random ref voids every approval (fails closed).
+  once per call), and the application mints a new charge's `charge_ref` server-side from
+  `ctx.thread_id` and `ctx.call_id` together (a call id alone can repeat in another thread),
+  never from the arguments. A random ref voids every approval (fails closed).
 - Execute exactly the returned `closed` (the tool reads it with `closed_mandate_from_config`) and
   reserve `reserve_amount(closed)` under its `charge_ref`. Make money tools idempotent on it.
 - Wire `on_decision` to `audit-log`, once per call with its final outcome.

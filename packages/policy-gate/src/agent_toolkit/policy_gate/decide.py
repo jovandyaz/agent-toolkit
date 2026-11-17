@@ -9,6 +9,7 @@ from agent_toolkit import budgets, mandates
 from agent_toolkit.mandates import ClosedMandate, ConsumptionEntry, OpenMandate, Violation
 from agent_toolkit.policy_gate.models import (
     Allow,
+    BuildContext,
     Decision,
     Deny,
     GateContext,
@@ -36,6 +37,7 @@ _MAX_SEGMENT = 64
 class _MandateInputs:
     mandate: OpenMandate
     ledger: tuple[ConsumptionEntry, ...]
+    thread_id: str
 
 
 @dataclass(frozen=True)
@@ -45,8 +47,13 @@ class _Charge:
     verified: bool
 
 
-def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
+def decide(
+    call: ToolCall, tool: ToolSpec, ctx: GateContext, *, thread_id: str | None = None
+) -> Decision:
     """Decide whether `call` may run, before it runs.
+
+    `thread_id` is the conversation the call belongs to, from the runtime (the LangGraph adapter
+    passes `configurable["thread_id"]`); the builder of a financial call gets it.
 
     Rules, in order. The first `Deny` wins and approval reasons accumulate, so `Deny` takes
     precedence over `RequireApproval`:
@@ -56,8 +63,9 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
        depth whatever the model's own config: deny `invalid_args:…`.
     3. An exceeded run budget: deny `budget_exceeded:<kind>`.
     4. A financial tool without a mandate needs approval (`no_mandate`). With one, it builds
-       the charge with `tool.to_closed_mandate(args, call.id)`; a `ValueError` (pydantic's
-       `ValidationError` included) denies `invalid_args:closed…`. A charge for another agent than
+       the charge with `tool.to_closed_mandate(args, BuildContext(thread_id=thread_id,
+       call_id=call.id))`; a `ValueError` (pydantic's `ValidationError` included) denies
+       `invalid_args:closed…`. A charge for another agent than
        `ctx.session.agent_id` denies `agent_mismatch`, and a mandate of another principal than
        `ctx.session.principal_id` denies `principal_mismatch`. From `ctx.ledger` it computes
        the budget consumed this period and the state of the charge's own `charge_ref`; a
@@ -107,10 +115,12 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
       adapter hands `closed` to the tool; see `closed_mandate_from_config`).
 
     Raises ValueError, before any rule, when a financial tool runs under a mandate and
-    `ctx.ledger` is None: treating it as empty would overspend. Exceptions other than
-    `ValueError` from the tool's models or builder propagate.
+    `ctx.ledger` is None (treating it as empty would overspend) or `thread_id` is None (a ref
+    minted from the call id alone could collide with another thread's), and, when it builds
+    the charge, if either id is empty. Exceptions other than `ValueError` from the tool's models
+    or builder propagate.
     """
-    inputs = _mandate_inputs(tool, ctx)
+    inputs = _mandate_inputs(tool, ctx, thread_id)
     if call.name != tool.name:
         return Deny(reasons=("tool_mismatch",))
     args = _parse_args(call, tool)
@@ -138,8 +148,10 @@ def decide(call: ToolCall, tool: ToolSpec, ctx: GateContext) -> Decision:
     return Allow(args=args, closed=charge.closed)
 
 
-def _mandate_inputs(tool: ToolSpec, ctx: GateContext) -> _MandateInputs | None:
-    """The mandate and its ledger a financial call needs; None without a mandate."""
+def _mandate_inputs(
+    tool: ToolSpec, ctx: GateContext, thread_id: str | None
+) -> _MandateInputs | None:
+    """The mandate, its ledger and the thread a financial call needs; None without a mandate."""
     if not tool.financial or ctx.mandate is None:
         return None
     if ctx.ledger is None:
@@ -147,7 +159,12 @@ def _mandate_inputs(tool: ToolSpec, ctx: GateContext) -> _MandateInputs | None:
             f"financial tool {tool.name!r} under mandate {ctx.mandate.id!r} needs the "
             "mandate's ledger"
         )
-    return _MandateInputs(mandate=ctx.mandate, ledger=ctx.ledger)
+    if thread_id is None:
+        raise ValueError(
+            f"financial tool {tool.name!r} under mandate {ctx.mandate.id!r} needs the "
+            "thread_id its builder mints the charge's ref from"
+        )
+    return _MandateInputs(mandate=ctx.mandate, ledger=ctx.ledger, thread_id=thread_id)
 
 
 def _parse_args(call: ToolCall, tool: ToolSpec) -> BaseModel | Deny:
@@ -169,8 +186,10 @@ def _judge_charge(
     build = tool.to_closed_mandate
     if build is None:  # ToolSpec validation forbids it; model_construct can bypass that.
         raise ValueError(f"financial tool {tool.name!r} has no to_closed_mandate")
+    # Outside the try below: an empty id is the caller's error, not a charge to deny.
+    build_ctx = BuildContext(thread_id=inputs.thread_id, call_id=call_id)
     try:
-        closed = build(args, call_id)
+        closed = build(args, build_ctx)
     except ValueError as error:
         return Deny(reasons=_invalid_args("closed", error))
     if closed.agent_id != ctx.session.agent_id:

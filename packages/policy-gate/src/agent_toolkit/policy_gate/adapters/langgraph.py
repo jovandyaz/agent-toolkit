@@ -4,16 +4,20 @@ Install with the `langgraph` extra. Put it where a graph would put `ToolNode`:
 `builder.add_node("tools", GatedToolNode(tools, specs, context, on_decision=audit))`.
 
 Each run reads the `tool_calls` of `state["messages"][-1]`, which must be an `AIMessage` (the
-node never looks further back, so re-entering it cannot run a turn twice), and:
+node never looks further back, so re-entering it cannot run a turn twice), and needs
+`configurable["thread_id"]` (ValueError otherwise, before anything is decided). Then it:
 
-1. Builds the context with `context(state)` and decides every call with `decide`, in order,
-   before running any. Each call is judged against the ledger plus a reserve
-   (`mandates.reserve_amount(closed)`, dated `ctx.now`) for every earlier charge of the turn
-   that was allowed or needs approval, so one turn cannot overspend the mandate's budget (a
-   later rejection only frees budget). A call on the `charge_ref` of an earlier call of the
+1. Builds the context with `context(state)` and decides every call with
+   `decide(..., thread_id=thread_id)`, in order, before running any; a financial tool's builder
+   gets `BuildContext(thread_id, call_id)`. Each call is judged against the ledger plus a
+   reserve (`mandates.reserve_amount(closed)`, dated `ctx.now`) for every earlier charge of the
+   turn that was allowed or needs approval, so one turn cannot overspend the mandate's budget
+   (a later rejection only frees budget). A call on the `charge_ref` of an earlier call of the
    turn that was not denied is denied (`charge_ref_in_turn`, not configurable): its check would
    rest on a reserve that rejecting the earlier call undoes, so multi-step changes to one
-   charge (create then raise, raise twice) must span turns. All of this is pure and
+   charge (create then raise, raise twice) must span turns. The rule is checked on the ref the
+   builder gives the call and again on the ref of the charge `decide` checked, so a builder
+   that is not deterministic cannot slip a second change past it. All of this is pure and
    deterministic, so the re-run on resume rebuilds the same decisions and hashes. A call to a
    tool missing from `tools` or `specs` is denied (`unknown_tool`).
 2. If calls need approval, pauses the graph with one `interrupt` whose value is the list of
@@ -55,18 +59,18 @@ Duties of the application:
 
 - Resume only from the trusted approval screen through an authenticated channel, never from
   chat input. The interrupt has no `response_schema`, so chat clients render no approval
-  form. Approvals need a thread: without `configurable["thread_id"]` the node raises
-  ValueError.
+  form. Run the graph with a checkpointer and a thread.
 - `context(state)` runs on every execution, the re-run on resume included. Hold the mandate
   lock from the first decision, across the interrupt, until the charge's reserve is recorded;
   without it the re-run re-verifies against whatever changed, and a call can end denied or
   gain reasons that void its approval.
-- `ToolSpec.to_closed_mandate(args, call_id)` must be deterministic and free of side effects:
+- `ToolSpec.to_closed_mandate(args, ctx)` must be deterministic and free of side effects:
   the node calls it more than once per call (to find the call's `charge_ref`, inside `decide`,
   and again on the re-run), and the approval binds the charge's `content_hash`, so a builder
   that mints a random `charge_ref` per call voids every approval of a financial call (it fails
-  closed). Mint the ref server-side from the call, for
-  example a hash of the thread id and `call_id`, never from tool arguments.
+  closed). Mint a new charge's ref server-side from `ctx.thread_id` and `ctx.call_id`
+  together (for example a hash of both; a call id alone can repeat in another thread), never
+  from tool arguments.
 - A financial tool issues the charge from `closed_mandate_from_config(config)`, not one
   rebuilt from its arguments, and the reserve is recorded under its `charge_ref`.
 - A node is LangGraph's unit of retry. A tool or `on_decision` error after some calls ran fails
@@ -108,6 +112,7 @@ from agent_toolkit.mandates import ClosedMandate, ConsumptionEntry
 from agent_toolkit.policy_gate.decide import decide
 from agent_toolkit.policy_gate.models import (
     Allow,
+    BuildContext,
     Decision,
     Deny,
     GateContext,
@@ -227,8 +232,9 @@ class GatedToolNode[StateT: Mapping[str, object]]:
         calls = _tool_calls(state)
         if not calls:
             return {"messages": []}
-        decisions = self._decide_in_order(calls, self._context(state))
-        requests = _requests(calls, decisions, config)
+        thread_id = _thread_id(config)
+        decisions = self._decide_in_order(calls, self._context(state), thread_id)
+        requests = _requests(calls, decisions, thread_id)
         answers = _ask(list(requests.values()))
         outcomes = [
             _resolve(call, decision, requests.get(call.id), answers)
@@ -249,42 +255,49 @@ class GatedToolNode[StateT: Mapping[str, object]]:
                 self._report(outcome)
         return {"messages": replies}
 
-    def _decide_in_order(self, calls: Sequence[ToolCall], ctx: GateContext) -> list[Decision]:
+    def _decide_in_order(
+        self, calls: Sequence[ToolCall], ctx: GateContext, thread_id: str
+    ) -> list[Decision]:
         """Decide each call against the ledger plus the reserves of the turn's earlier charges.
 
         A call on a charge that an earlier call of the turn may still change is denied
         (`charge_ref_in_turn`): its check would rest on a reserve that rejecting the earlier
-        call undoes. Budget alone needs no such rule: a rejection only frees budget.
+        call undoes. Budget alone needs no such rule: a rejection only frees budget. The ref is
+        checked before deciding (as the builder plans it) and after (as `decide` checked it).
         """
         decisions: list[Decision] = []
         taken: set[str] = set()  # Refs of the turn's charges that may still run.
         for call in calls:
-            if self._planned_ref(call, ctx) in taken:
+            if self._planned_ref(call, ctx, thread_id) in taken:
                 decision: Decision = _SAME_CHARGE_IN_TURN
             else:
-                decision = self._decide(call, ctx)
-            if not isinstance(decision, Deny) and decision.closed is not None:
-                taken.add(decision.closed.charge_ref)
+                decision = self._decide(call, ctx, thread_id)
+            closed = None if isinstance(decision, Deny) else decision.closed
+            if closed is not None and closed.charge_ref in taken:  # A builder that drifts.
+                decision = _SAME_CHARGE_IN_TURN
+            elif closed is not None:
+                taken.add(closed.charge_ref)
             decisions.append(decision)
             ctx = _with_reserve(ctx, decision)
         return decisions
 
-    def _planned_ref(self, call: ToolCall, ctx: GateContext) -> str | None:
+    def _planned_ref(self, call: ToolCall, ctx: GateContext, thread_id: str) -> str | None:
         """The `charge_ref` the call's builder gives it, as `decide` would build it, if any."""
         spec = self._specs.get(call.name)
         if spec is None or spec.to_closed_mandate is None or ctx.mandate is None:
             return None
         try:
             args = spec.args_model.model_validate(call.args, strict=True, extra="forbid")
-            return spec.to_closed_mandate(args, call.id).charge_ref
+            build_ctx = BuildContext(thread_id=thread_id, call_id=call.id)
+            return spec.to_closed_mandate(args, build_ctx).charge_ref
         except ValueError:  # `decide` denies the call (`invalid_args:…`).
             return None
 
-    def _decide(self, call: ToolCall, ctx: GateContext) -> Decision:
+    def _decide(self, call: ToolCall, ctx: GateContext, thread_id: str) -> Decision:
         spec = self._specs.get(call.name)
         if spec is None or call.name not in self._tools:
             return Deny(reasons=("unknown_tool",))
-        return decide(call, spec, ctx)
+        return decide(call, spec, ctx, thread_id=thread_id)
 
     def _run(
         self, call: ToolCall, decision: Allow | RequireApproval, config: RunnableConfig
@@ -348,24 +361,20 @@ def _json_args(decision: Allow | RequireApproval) -> dict[str, object]:
 
 
 def _requests(
-    calls: Sequence[ToolCall], decisions: Sequence[Decision], config: RunnableConfig
+    calls: Sequence[ToolCall], decisions: Sequence[Decision], thread_id: str
 ) -> dict[str, ApprovalRequest]:
-    pending = [
-        (call, decision)
+    return {
+        call.id: _request(call, decision, thread_id)
         for call, decision in zip(calls, decisions, strict=True)
         if isinstance(decision, RequireApproval)
-    ]
-    if not pending:
-        return {}
-    thread_id = _thread_id(config)
-    return {call.id: _request(call, decision, thread_id) for call, decision in pending}
+    }
 
 
 def _thread_id(config: RunnableConfig) -> str:
     thread_id = config.get("configurable", {}).get("thread_id")
     if thread_id is None or not str(thread_id):
         raise ValueError(
-            "approvals need config['configurable']['thread_id']: run the graph with a "
+            "GatedToolNode needs config['configurable']['thread_id']: run the graph with a "
             "checkpointer and a thread"
         )
     return str(thread_id)

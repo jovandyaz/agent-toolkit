@@ -31,6 +31,20 @@ class Effects(BaseModel):
     external_comm: bool
 
 
+class BuildContext(BaseModel):
+    """What a closed-mandate builder knows about the call besides its arguments.
+
+    `thread_id` is the conversation the call belongs to and `call_id` the model's id for the
+    call. Both come from the runtime, never from tool arguments, and together identify the call:
+    a call id alone can repeat in another thread. Fields may be added; builders read them by name.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    thread_id: Identifier
+    call_id: Identifier
+
+
 class ToolSpec(BaseModel):
     """A tool the agent may call, its risk, and how to validate what the model asks of it.
 
@@ -39,14 +53,14 @@ class ToolSpec(BaseModel):
     it JSON-shaped fields (str, int, bool, None, list, dict, Literal, nested models): strict
     validation rejects a string for a date, Decimal or Enum field and a list for a tuple.
 
-    A `financial` tool issues payment requests, so it needs `to_closed_mandate(args, call_id)`:
-    it turns the parsed arguments (an `args_model` instance) of the tool call `call_id` into the
-    concrete charge that `mandates.check` judges. The application fills `agent_id` from the
-    session and mints a new charge's `charge_ref` server-side, for example from a hash of the
-    thread id and `call_id`; neither ever comes from the arguments. The builder must be
-    deterministic for a given (args, call_id) and free of side effects: it may run more than
-    once per call (the LangGraph adapter also re-runs `decide` on resume), and an approval
-    binds the charge it showed.
+    A `financial` tool issues payment requests, so it needs `to_closed_mandate(args, ctx)`: it
+    turns the parsed arguments (an `args_model` instance) of one tool call, identified by `ctx`
+    (a `BuildContext`), into the concrete charge that `mandates.check` judges. The application
+    fills `agent_id` from the session and mints a new charge's `charge_ref` server-side,
+    deterministically from `ctx.thread_id` and `ctx.call_id` together (for example a hash of
+    both); neither ever comes from the arguments. The builder must be deterministic for a given
+    (args, ctx) and free of side effects: it may run more than once per call (the LangGraph
+    adapter also re-runs `decide` on resume), and an approval binds the charge it showed.
     Only a financial tool takes a builder: on any other tool it would never run, which most
     likely means a money tool is missing `financial=True`.
 
@@ -63,7 +77,7 @@ class ToolSpec(BaseModel):
     reversible: bool
     financial: bool
     args_model: type[BaseModel]
-    to_closed_mandate: Callable[[BaseModel, str], ClosedMandate] | None
+    to_closed_mandate: Callable[[BaseModel, BuildContext], ClosedMandate] | None
 
     @model_validator(mode="after")
     def _check(self) -> Self:

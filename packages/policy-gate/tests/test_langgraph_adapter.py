@@ -1,7 +1,10 @@
 """`GatedToolNode`: a LangGraph tool node that runs only the tool calls the policy gate allows."""
 
 import asyncio
+import hashlib
+import json
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +35,7 @@ from agent_toolkit.mandates import (
 )
 from agent_toolkit.policy_gate import (
     Allow,
+    BuildContext,
     Decision,
     Deny,
     Effects,
@@ -83,7 +87,13 @@ class ToolChargeArgs(BaseModel):
     link_ref: str | None = None
 
 
-Builder = Callable[[BaseModel, str], ClosedMandate]
+Builder = Callable[[BaseModel, BuildContext], ClosedMandate]
+
+
+def mint_ref(ctx: BuildContext) -> str:
+    """A new charge's ref, minted server-side from the thread and the call (never the model)."""
+    canonical = json.dumps([ctx.thread_id, ctx.call_id], separators=(",", ":"))
+    return f"ch_{hashlib.sha256(canonical.encode()).hexdigest()[:32]}"
 
 
 def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
@@ -104,12 +114,12 @@ def new_charge(args: BaseModel, charge_ref: str) -> ClosedMandate:
     )
 
 
-def build_charge(args: BaseModel, call_id: str) -> ClosedMandate:
+def build_charge(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     """The application's builder: it mints the ref from the call, so a re-run rebuilds it."""
-    return new_charge(args, f"ch_{call_id}")
+    return new_charge(args, mint_ref(ctx))
 
 
-def build_with_random_ref(args: BaseModel, call_id: str) -> ClosedMandate:
+def build_with_random_ref(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
     """A careless builder: a fresh ref on every call, so the re-run builds another charge."""
     return new_charge(args, f"ch_{uuid.uuid4().hex}")
 
@@ -254,6 +264,14 @@ class Rig:
             context=self.build_context,
             on_decision=self.record,
         )
+
+    @property
+    def thread_id(self) -> str:
+        return str(self.thread["configurable"]["thread_id"])
+
+    def built(self, args: ChargeArgs, call_id: str) -> ClosedMandate:
+        """The charge the application's builder makes for `call_id` in this rig's thread."""
+        return build_charge(args, BuildContext(thread_id=self.thread_id, call_id=call_id))
 
     def build_context(self, state: MessagesState) -> GateContext:
         self.contexts_built += 1
@@ -582,7 +600,7 @@ def test_deterministic_builder_keeps_the_approval_valid_on_the_re_run() -> None:
     open_amount = call("request_payment", "c1", payer="cust-juan")
     (request,) = pending(graph.invoke(turn(open_amount), rig.thread))
     assert request.reasons == ("mandate:open_amount",)
-    checked = build_charge(ChargeArgs(payer="cust-juan"), "c1")
+    checked = rig.built(ChargeArgs(payer="cust-juan"), "c1")
     assert request.closed_mandate_hash == checked.content_hash
 
     graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
@@ -604,11 +622,58 @@ def test_builder_minting_a_random_ref_fails_closed() -> None:
     )
 
 
+def test_builder_gets_the_thread_and_call_ids() -> None:
+    seen: list[BuildContext] = []
+
+    def recording(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
+        seen.append(ctx)
+        return build_charge(args, ctx)
+
+    rig = Rig(builder=recording)
+    rig.graph().invoke(
+        turn(call("request_payment", "c1", payer="cust-juan", amount_minor=35000)), rig.thread
+    )
+
+    assert seen
+    assert set(seen) == {BuildContext(thread_id=rig.thread_id, call_id="c1")}
+    assert rig.charge.closed_seen == [
+        rig.built(ChargeArgs(payer="cust-juan", amount_minor=35000), "c1")
+    ]
+
+
+def test_a_charge_rebuilt_onto_a_ref_the_turn_took_is_denied() -> None:
+    # A builder that is not deterministic: the charge `decide` checks for c2 lands on c1's ref,
+    # although the ref built to plan the turn did not. It must not run as a second charge there.
+    builds: Counter[str] = Counter()
+
+    def drifting(args: BaseModel, ctx: BuildContext) -> ClosedMandate:
+        builds[ctx.call_id] += 1
+        if ctx.call_id == "c2" and builds["c2"] % 2:
+            return new_charge(args, "ch_fresh")
+        return new_charge(args, "ch_shared")
+
+    rig = Rig(builder=drifting)
+    graph = rig.graph()
+    calls = turn(
+        call("request_payment", "c1", payer="cust-juan"),  # Open amount: it reserves nothing.
+        call("request_payment", "c2", payer="cust-juan", amount_minor=35000),
+    )
+    (request,) = pending(graph.invoke(calls, rig.thread))
+    assert request.call_id == "c1"
+
+    resumed = graph.invoke(Command(resume={"c1": answer(request)}), rig.thread)
+
+    assert [closed.charge_ref for closed in rig.charge.closed_seen if closed] == ["ch_shared"]
+    assert replies(resumed)["c2"].content == "Not executed: charge_ref_in_turn"
+    assert ("c2", Deny(reasons=("charge_ref_in_turn",))) in [(c.id, d) for c, d, _ in rig.reports]
+
+
 def test_tools_receive_the_checked_closed_mandate_via_config() -> None:
     # Whatever the caller put under the key, each tool gets the charge checked for its call.
     rig = Rig()
     graph = rig.graph()
-    forged = build_charge(ChargeArgs(payer="cust-juan", amount_minor=500000), "forged")
+    in_t1 = BuildContext(thread_id="t1", call_id="forged")
+    forged = build_charge(ChargeArgs(payer="cust-juan", amount_minor=500000), in_t1)
     config = RunnableConfig(configurable={"thread_id": "t1", CLOSED_MANDATE_KEY: forged})
     calls = turn(
         call("request_payment", "c1", payer="cust-juan"),  # Open amount: needs approval.
@@ -620,9 +685,10 @@ def test_tools_receive_the_checked_closed_mandate_via_config() -> None:
     graph.invoke(Command(resume={"c1": answer(request)}), config)
 
     checked = {c.id: d.closed for c, d, _ in rig.reports if not isinstance(d, Deny)}
-    assert checked["c1"] == build_charge(ChargeArgs(payer="cust-juan"), "c1")
+    c1, c2 = (in_t1.model_copy(update={"call_id": call_id}) for call_id in ("c1", "c2"))
+    assert checked["c1"] == build_charge(ChargeArgs(payer="cust-juan"), c1)
     assert checked["c1"].content_hash == request.closed_mandate_hash
-    assert checked["c2"] == build_charge(ChargeArgs(payer="cust-juan", amount_minor=35000), "c2")
+    assert checked["c2"] == build_charge(ChargeArgs(payer="cust-juan", amount_minor=35000), c2)
     assert rig.charge.closed_seen == [checked["c1"], checked["c2"]]
     assert rig.lookup.closed_seen == [None]
 
@@ -768,7 +834,7 @@ def test_an_increase_of_a_charge_created_in_the_same_turn_is_denied() -> None:
         payer="cust-juan",
         amount_minor=45000,
         previous_amount_minor=35000,
-        link_ref="ch_c1",  # The ref the builder mints for c1.
+        link_ref=mint_ref(BuildContext(thread_id=rig.thread_id, call_id="c1")),  # c1's ref.
     )
 
     result = rig.graph().invoke(turn(created, raised), rig.thread)
@@ -808,6 +874,22 @@ def test_approval_needs_a_thread_id() -> None:
     with pytest.raises(ValueError, match="thread_id"):
         rig.graph(durable=False).invoke(turn(call("delete_customer", "c1")))
     assert rig.total_runs() == 0
+
+
+@pytest.mark.parametrize(
+    "proposed",
+    [
+        call("lookup_customer", "c1"),
+        call("request_payment", "c1", payer="cust-juan", amount_minor=35000),
+    ],
+)
+def test_every_turn_needs_a_thread_id(proposed: LcToolCall) -> None:
+    # Builders mint refs from the thread id: without one, nothing is decided or run.
+    rig = Rig()
+
+    with pytest.raises(ValueError, match="thread_id"):
+        rig.graph(durable=False).invoke(turn(proposed))
+    assert (rig.total_runs(), rig.contexts_built, rig.reports) == (0, 0, [])
 
 
 # Unknown tools, bad input and configuration.
