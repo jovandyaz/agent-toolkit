@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `agent-toolkit-model-routing`: `ProviderCooldown`, a thread-safe circuit breaker per provider
+  key (consecutive failures to open, cooldown window, one half-open trial, a forced trial for the
+  soonest key when the whole chain is cooling, injectable clock, classification and transition
+  hooks), `is_retryable`, `call`/`acall`, and a LangChain adapter (extra `langchain`):
+  `CooldownRunnable`, `CooldownFallbacks` (a fallback chain that never hides a real error behind
+  a skip, with `exceptions_to_handle`), `with_cooldown_fallbacks` and `langchain_is_retryable`.
+
 ## [0.1.0rc1] - 2026-11-17
 
 Release candidate for `0.1.0`, the first release of seven packages.

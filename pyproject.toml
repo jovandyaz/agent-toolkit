@@ -9,7 +9,7 @@ dev = [
     "mypy>=2.4,<3",
     "import-linter>=2.16,<3",
     "pydantic>=2.14,<3",  # needed by the pydantic.mypy plugin
-    "langchain-core>=1.8,<2",  # dev and tests of the budgets langchain adapter
+    "langchain-core>=1.8,<2",  # dev and tests of the budgets and model-routing langchain adapters
     "langgraph>=1.2,<2",  # dev and tests of the policy-gate langgraph adapter
     "psycopg[binary]>=3.3,<4",  # dev and tests of the audit-log postgres adapter
 ]
@@ -49,6 +49,7 @@ root_packages = [
     "agent_toolkit.policy_gate",
     "agent_toolkit.audit_log",
     "agent_toolkit.evals",
+    "agent_toolkit.model_routing",
 ]
 include_external_packages = true
 
