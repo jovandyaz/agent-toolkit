@@ -12,8 +12,10 @@ members = [
     "agent-toolkit-budgets",
     "agent-toolkit-evals",
     "agent-toolkit-mandates",
+    "agent-toolkit-model-routing",
     "agent-toolkit-payments-core",
     "agent-toolkit-policy-gate",
+    "agent-toolkit-prompt-guard",
     "agent-toolkit-webhooks",
 ]
 
@@ -105,6 +107,20 @@ requires-dist = [
 ]
 
 [[package]]
+name = "agent-toolkit-model-routing"
+version = "0.1.0rc1"
+source = { editable = "packages/model-routing" }
+
+[package.optional-dependencies]
+langchain = [
+    { name = "langchain-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=1.8,<2" }]
+provides-extras = ["langchain"]
+
+[[package]]
 name = "agent-toolkit-payments-core"
 version = "0.1.0rc1"
 source = { editable = "packages/payments-core" }
@@ -138,6 +154,17 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14,<3" },
 ]
 provides-extras = ["langgraph"]
+
+[[package]]
+name = "agent-toolkit-prompt-guard"
+version = "0.1.0rc1"
+source = { editable = "packages/prompt-guard" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
 
 [[package]]
 name = "agent-toolkit-webhooks"

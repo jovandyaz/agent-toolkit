@@ -20,7 +20,7 @@ def runnable_blocks(text: str) -> list[str]:
 
 def test_every_package_has_a_readme_with_a_runnable_example() -> None:
     packages = sorted(ROOT.glob("packages/*"))
-    assert len(packages) == 7
+    assert len(packages) == 9
     for package in packages:
         readme = package / "README.md"
         assert readme.is_file(), f"{package.name} has no README.md"

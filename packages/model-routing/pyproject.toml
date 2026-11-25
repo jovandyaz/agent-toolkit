@@ -1,0 +1,17 @@
+[project]
+name = "agent-toolkit-model-routing"
+version = "0.1.0rc1"
+description = "Model routing for agents: a per-provider circuit breaker so fallback chains skip failing providers."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=1.8,<2"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.model_routing"
