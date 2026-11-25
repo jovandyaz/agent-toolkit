@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-webhooks"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Standard Webhooks signature verification and an idempotent inbox for exactly-once processing."
 requires-python = ">=3.12"
 license = "Apache-2.0"

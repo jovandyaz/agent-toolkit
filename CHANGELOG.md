@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0rc2] - 2026-11-25
+
+Second release candidate for `0.1.0`: adds two packages, nine in all.
+
 ### Added
 
 - `agent-toolkit-model-routing`: `ProviderCooldown`, a thread-safe circuit breaker per provider
@@ -75,5 +79,6 @@ code written against earlier commits of `agent-toolkit-policy-gate`.
   `mandate:previous_amount_mismatch`, `call_id_reused`) gets a reply that tells the model to check
   its status before retrying, not `Not executed`.
 
-[Unreleased]: https://github.com/jovandyaz/agent-toolkit/compare/v0.1.0rc1...HEAD
+[Unreleased]: https://github.com/jovandyaz/agent-toolkit/compare/v0.1.0rc2...HEAD
+[0.1.0rc2]: https://github.com/jovandyaz/agent-toolkit/compare/v0.1.0rc1...v0.1.0rc2
 [0.1.0rc1]: https://github.com/jovandyaz/agent-toolkit/compare/v0.1.0a1...v0.1.0rc1

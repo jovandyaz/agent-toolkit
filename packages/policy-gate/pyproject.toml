@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-policy-gate"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Deterministic gate for agent tool calls: allow, require approval or deny, from tool risk, mandates and budgets."
 requires-python = ">=3.12"
 license = "Apache-2.0"

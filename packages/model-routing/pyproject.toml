@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-model-routing"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Model routing for agents: a per-provider circuit breaker so fallback chains skip failing providers."
 requires-python = ">=3.12"
 license = "Apache-2.0"

@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-payments-core"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Request-to-pay payment domain without I/O: money, intents, attempts and payment policies."
 requires-python = ">=3.12"
 license = "Apache-2.0"

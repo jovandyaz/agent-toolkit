@@ -36,6 +36,6 @@ Hackatón México (separate private repo). Second planned consumer: CDMX permit 
 ## Git
 Conventional Commits, single line, English, no trailers. Branch per package, PR per package; never
 push to `main`. Lockstep versioning: all packages share one PEP 440 version and one tag
-`v{version}` (latest `v0.1.0rc1`, next `v0.1.0`). A release bumps every `pyproject.toml`, refreshes
+`v{version}` (latest `v0.1.0rc2`, next `v0.1.0`). A release bumps every `pyproject.toml`, refreshes
 `uv.lock` and moves `CHANGELOG.md` Unreleased; CI checks the tag with `scripts/check_versions.py`.
 Revisit per-package versions once the packages are on PyPI.
