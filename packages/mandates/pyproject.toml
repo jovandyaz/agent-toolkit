@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-mandates"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Open and closed mandates for agents that issue payment requests: a pure check and budget consumption."
 requires-python = ">=3.12"
 license = "Apache-2.0"

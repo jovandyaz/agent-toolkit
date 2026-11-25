@@ -1,6 +1,6 @@
 [project]
 name = "agent-toolkit-prompt-guard"
-version = "0.1.0rc1"
+version = "0.1.0rc2"
 description = "Heuristic prompt-injection verdicts with rule ids, and a helper that wraps untrusted text as data."
 requires-python = ">=3.12"
 license = "Apache-2.0"
