@@ -15,6 +15,7 @@ members = [
     "agent-toolkit-model-routing",
     "agent-toolkit-payments-core",
     "agent-toolkit-policy-gate",
+    "agent-toolkit-prompt-guard",
     "agent-toolkit-webhooks",
 ]
 
@@ -153,6 +154,17 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14,<3" },
 ]
 provides-extras = ["langgraph"]
+
+[[package]]
+name = "agent-toolkit-prompt-guard"
+version = "0.1.0rc1"
+source = { editable = "packages/prompt-guard" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.14,<3" }]
 
 [[package]]
 name = "agent-toolkit-webhooks"

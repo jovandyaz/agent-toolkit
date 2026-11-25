@@ -7,7 +7,8 @@ Hackatón México (separate private repo). Second planned consumer: CDMX permit 
 
 ## Read first
 - Design: `docs/superpowers/specs/2026-11-15-agent-toolkit-design.md` (approved 2026-11-16).
-- Plan: `docs/superpowers/plans/2026-11-16-agent-toolkit-packages-plan.md`. Tick steps as they land;
+- Plans: `docs/superpowers/plans/2026-11-16-agent-toolkit-packages-plan.md` (first seven packages),
+  `docs/superpowers/plans/2026-11-24-model-routing-prompt-guard-plan.md` (`model-routing`, `prompt-guard`). Tick steps as they land;
   the plan is the progress record.
 
 ## Rules
@@ -34,7 +35,7 @@ Hackatón México (separate private repo). Second planned consumer: CDMX permit 
 
 ## Git
 Conventional Commits, single line, English, no trailers. Branch per package, PR per package; never
-push to `main`. Lockstep versioning: all seven packages share one PEP 440 version and one tag
+push to `main`. Lockstep versioning: all packages share one PEP 440 version and one tag
 `v{version}` (latest `v0.1.0rc1`, next `v0.1.0`). A release bumps every `pyproject.toml`, refreshes
 `uv.lock` and moves `CHANGELOG.md` Unreleased; CI checks the tag with `scripts/check_versions.py`.
 Revisit per-package versions once the packages are on PyPI.

@@ -18,6 +18,7 @@ adapters; the cores never import a framework, a database driver or a provider SD
 | [`payments-core`](packages/payments-core) | Request-to-pay domain (intents, attempts, idempotent reconciliation), no I/O | none | prior collections project |
 | [`webhooks`](packages/webhooks) | Standard Webhooks verification plus an idempotent inbox | none | Standard Webhooks |
 | [`model-routing`](packages/model-routing) | Per-provider circuit breaker so fallback chains skip failing providers | `langchain` | Azure "Circuit Breaker pattern", Fowler |
+| [`prompt-guard`](packages/prompt-guard) | Heuristic injection verdicts (es, en) with rule ids; wrap untrusted text as data | none | OWASP LLM01, OWASP prompt-injection cheat sheet |
 
 Dependency rule: only `policy-gate` depends on other packages (`mandates` and `budgets`). Every
 other package depends on nothing from this repo, and at most on `pydantic` (`model-routing`'s

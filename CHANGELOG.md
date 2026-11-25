@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
   hooks), `is_retryable`, `call`/`acall`, and a LangChain adapter (extra `langchain`):
   `CooldownRunnable`, `CooldownFallbacks` (a fallback chain that never hides a real error behind
   a skip, with `exceptions_to_handle`), `with_cooldown_fallbacks` and `langchain_is_retryable`.
+- `agent-toolkit-prompt-guard`: `scan` returning an `InjectionVerdict` with rule ids over
+  English and Spanish heuristics, a size cap, `neutralize` to wrap untrusted text as data, and
+  the attack/benign corpus as a CI gate.
 
 ## [0.1.0rc1] - 2026-11-17
 

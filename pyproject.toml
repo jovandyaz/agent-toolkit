@@ -50,6 +50,7 @@ root_packages = [
     "agent_toolkit.audit_log",
     "agent_toolkit.evals",
     "agent_toolkit.model_routing",
+    "agent_toolkit.prompt_guard",
 ]
 include_external_packages = true
 

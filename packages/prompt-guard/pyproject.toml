@@ -1,0 +1,14 @@
+[project]
+name = "agent-toolkit-prompt-guard"
+version = "0.1.0rc1"
+description = "Heuristic prompt-injection verdicts with rule ids, and a helper that wraps untrusted text as data."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.14,<3"]
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_toolkit.prompt_guard"
